@@ -9,12 +9,33 @@
 
 ## Last session summary
 
-Fixed two crashes/warnings found during the v0.1.0 smoke test on real Windows hardware.
+Fixed a silent tray-icon failure discovered during the v0.1.0 smoke test: app launched (~165 MB in Task Manager) but no tray icon ever appeared. Added global exception logging so future failures are never silent.
 
-### Fix 1 — Tray icon crash (H.NotifyIcon + RenderTargetBitmap)
-- `TrayIconHost` previously generated a placeholder icon via `RenderTargetBitmap`/`DrawingVisual`, which `H.NotifyIcon` does not support — caused `NotImplementedException` on launch.
-- Added `Assets\tray-icon.ico` as a `<Resource>` in `WAshed.App.csproj`.
-- Replaced the `CreatePlaceholderIcon` method with a `BitmapImage` loaded from the pack URI `pack://application:,,,/Assets/tray-icon.ico`.
+### Fix — Tray icon never appeared (silent failure)
+**Root cause:** `Assets\tray-icon.ico` was declared as `<Resource>` in `WAshed.App.csproj`. The file IS embedded into the WPF `.g.resources` bundle (confirmed by enumerating the bundle — key `assets/tray-icon.ico` was present). However, H.NotifyIcon cannot convert a `BitmapImage` loaded from a pack URI to a native `HICON`; its internal conversion path requires a real file path or a `System.Drawing.Icon`. The conversion throws silently on the WPF dispatcher, the app continues with no icon, and there is no console output.
+
+**Fix — csproj:** Replaced `<Resource Include="Assets\tray-icon.ico" />` with a `<Content>` directive that copies the file next to the exe at build time:
+```xml
+<Content Include="Assets\tray-icon.ico">
+  <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+</Content>
+```
+Verified: `bin/x64/Release/net8.0-windows10.0.19041.0/Assets/tray-icon.ico` now exists on disk after a clean rebuild.
+
+**Fix — TrayIconHost.cs:** Replaced the pack-URI `BitmapImage` with file-path loading:
+```csharp
+var iconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "tray-icon.ico");
+// throws FileNotFoundException with a descriptive message if missing
+var iconImage = new BitmapImage(new Uri(iconPath, UriKind.Absolute));
+```
+If the file is missing, a loud `FileNotFoundException` is thrown (not swallowed) so build misconfiguration is immediately obvious.
+
+### Added — Global exception logger
+Hooked `AppDomain.CurrentDomain.UnhandledException` and `Application.DispatcherUnhandledException` in `App.xaml.cs`. All unhandled exceptions (including full `InnerException` chain and stack trace) are written to `washed-crash.log` in `AppContext.BaseDirectory` AND to Debug output. For dispatcher exceptions, `e.Handled = true` is set so a bad icon load cannot take down the whole app, but the failure IS recorded.
+
+**Known fragility (do not revert):** Using `<Resource>` for .ico files in H.NotifyIcon projects is unreliable — H.NotifyIcon silently fails to create the native icon from a pack-URI BitmapImage. Always use `<Content CopyToOutputDirectory>` + file-path loading for tray icon assets.
+
+**All 39 tests still green (17 WAshed.App.Tests + 22 WAshed.Core.Tests). Build 0 errors, 0 warnings.**
 
 ### Fix 2 — Win2D AnyCPU build warning
 - Added `<Platforms>x64</Platforms>` and `<PlatformTarget>x64</PlatformTarget>` to all five .csproj files (WAshed.Core, WAshed.Overlay, WAshed.App, WAshed.Core.Tests, WAshed.App.Tests).
@@ -77,10 +98,8 @@ Previous session: Shipped the two remaining pieces blocking the first end-to-end
 
 ## Next up
 
-**End-to-end smoke test on real hardware:**
-Launch `WAshed.App`, open WhatsApp Desktop, press Ctrl+Shift+B, verify blur appears
-over the WhatsApp window. File any issues found as the v0.2.0 backlog
-("The right regions").
+**End-to-end smoke test on real hardware (resumed):**
+Launch `WAshed.App`, confirm tray icon appears, open WhatsApp Desktop, press the hotkey (Ctrl+Shift+B), verify blur appears over the WhatsApp window. File any issues found as the v0.2.0 backlog ("The right regions").
 
 ## Blockers
 

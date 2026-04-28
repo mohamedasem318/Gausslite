@@ -1,5 +1,8 @@
+using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
+using System.Windows.Threading;
 using WAshed.App.Hotkey;
 using WAshed.App.Orchestration;
 using WAshed.App.Tray;
@@ -23,6 +26,15 @@ public partial class App : Application
     {
         base.OnStartup(e);
         ShutdownMode = ShutdownMode.OnExplicitShutdown;
+
+        AppDomain.CurrentDomain.UnhandledException += (_, args) =>
+            LogCrash(args.ExceptionObject as Exception, fatal: true);
+
+        DispatcherUnhandledException += (_, args) =>
+        {
+            LogCrash(args.Exception, fatal: false);
+            args.Handled = true;
+        };
 
         // --- Composition root ---
         // The only place new ConcreteType() is allowed for module types.
@@ -56,6 +68,20 @@ public partial class App : Application
 
         _trayIconHost = new TrayIconHost(_orchestrator);
         _trayIconHost.Initialize();
+    }
+
+    private static void LogCrash(Exception? ex, bool fatal)
+    {
+        var logPath = Path.Combine(AppContext.BaseDirectory, "washed-crash.log");
+        var lines = new System.Text.StringBuilder();
+        lines.AppendLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {(fatal ? "FATAL" : "DISPATCHER")} unhandled exception");
+        for (var e = ex; e is not null; e = e.InnerException)
+            lines.AppendLine($"  {e.GetType().FullName}: {e.Message}{Environment.NewLine}{e.StackTrace}");
+
+        var entry = lines.ToString();
+        Debug.WriteLine($"[WAshed] {entry}");
+        try { File.AppendAllText(logPath, entry); }
+        catch { /* never throw from crash logger */ }
     }
 
     protected override void OnExit(ExitEventArgs e)
