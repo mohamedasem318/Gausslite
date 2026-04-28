@@ -6,6 +6,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- x64 required: Win2D 1.3.0 ships native binaries that don't deploy under AnyCPU -->
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
     <!-- Required for unpackaged WinAppSDK/Win2D (transitive via WAshed.Core) -->
     <WindowsPackageType>None</WindowsPackageType>
     <!-- Suppress MRT Core PRI-generation tooling (no resource packaging needed) -->

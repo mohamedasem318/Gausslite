@@ -10,6 +10,9 @@
     <IsTestProject>true</IsTestProject>
     <!-- Suppress MRT Core PRI-generation tooling (transitive from Microsoft.Graphics.Win2D) -->
     <EnableCoreMrtTooling>false</EnableCoreMrtTooling>
+    <!-- x64 required: Win2D 1.3.0 ships native binaries that don't deploy under AnyCPU -->
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
   </PropertyGroup>
 
   <ItemGroup>

@@ -9,7 +9,23 @@
 
 ## Last session summary
 
-Shipped the two remaining pieces blocking the first end-to-end smoke test:
+Fixed two crashes/warnings found during the v0.1.0 smoke test on real Windows hardware.
+
+### Fix 1 — Tray icon crash (H.NotifyIcon + RenderTargetBitmap)
+- `TrayIconHost` previously generated a placeholder icon via `RenderTargetBitmap`/`DrawingVisual`, which `H.NotifyIcon` does not support — caused `NotImplementedException` on launch.
+- Added `Assets\tray-icon.ico` as a `<Resource>` in `WAshed.App.csproj`.
+- Replaced the `CreatePlaceholderIcon` method with a `BitmapImage` loaded from the pack URI `pack://application:,,,/Assets/tray-icon.ico`.
+
+### Fix 2 — Win2D AnyCPU build warning
+- Added `<Platforms>x64</Platforms>` and `<PlatformTarget>x64</PlatformTarget>` to all five .csproj files (WAshed.Core, WAshed.Overlay, WAshed.App, WAshed.Core.Tests, WAshed.App.Tests).
+- Updated `.sln` project config mappings to route the `Any CPU` solution platform to `x64` per-project configs; solution-level platform name kept as `Any CPU` so `dotnet build` works without `--arch x64`.
+- Build now produces zero warnings; `Microsoft.Graphics.Canvas.dll` lands under `runtimes/win-x64/native/` in the app output.
+
+**All 39 tests still green (17 WAshed.App.Tests + 22 WAshed.Core.Tests). Build 0 errors, 0 warnings.**
+
+---
+
+Previous session: Shipped the two remaining pieces blocking the first end-to-end smoke test:
 
 ### Part 1 — CaptureItemFactory (real WinRT activation)
 - Replaced the stub in `CaptureItemFactory.TryCreateForWhatsApp` with a full
@@ -74,6 +90,7 @@ None.
 
 (See `PLAN.md` Decisions Log for the full history.)
 
+- Solution pinned to x64 (Win2D requires a concrete platform; ARM64 support deferred to post-v1).
 - IDE = VS2022 throughout (driver dev in v1 requires it)
 - Claude Code workflow = terminal alongside VS2022, not as IDE extension
 - `SharpDX.Direct3D9` 4.2.0 chosen for D3D9Ex managed wrappers in WAshed.Overlay;

@@ -1,6 +1,5 @@
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using H.NotifyIcon;
 using WAshed.App.Orchestration;
@@ -25,7 +24,8 @@ internal sealed class TrayIconHost : IDisposable
         _taskbarIcon = new TaskbarIcon
         {
             ToolTipText = "WAshed",
-            IconSource = CreatePlaceholderIcon() // TODO: replace with real icon asset
+            // TODO: consider a higher-resolution icon asset for HiDPI displays
+            IconSource = new BitmapImage(new Uri("pack://application:,,,/Assets/tray-icon.ico"))
         };
 
         _toggleItem = new MenuItem
@@ -52,19 +52,6 @@ internal sealed class TrayIconHost : IDisposable
     {
         if (_toggleItem is not null)
             _toggleItem.IsChecked = isEnabled;
-    }
-
-    private static ImageSource CreatePlaceholderIcon()
-    {
-        // Render a solid 16×16 teal square as the tray icon placeholder.
-        var visual = new DrawingVisual();
-        using (var ctx = visual.RenderOpen())
-            ctx.DrawRectangle(new SolidColorBrush(Color.FromRgb(32, 160, 96)), null, new Rect(0, 0, 16, 16));
-
-        var bmp = new RenderTargetBitmap(16, 16, 96, 96, PixelFormats.Pbgra32);
-        bmp.Render(visual);
-        bmp.Freeze();
-        return bmp;
     }
 
     public void Dispose()

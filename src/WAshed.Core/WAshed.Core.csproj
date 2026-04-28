@@ -5,6 +5,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <UseWPF>true</UseWPF>
+    <!-- x64 required: Win2D 1.3.0 ships native binaries that don't deploy under AnyCPU -->
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
     <!-- Required for Microsoft.Graphics.Win2D (WinAppSDK-based) in an unpackaged project -->
     <WindowsPackageType>None</WindowsPackageType>
     <!--
