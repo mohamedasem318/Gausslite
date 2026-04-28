@@ -1,9 +1,7 @@
-﻿<Application x:Class="WAshed.App.App"
+<Application x:Class="WAshed.App.App"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             xmlns:local="clr-namespace:WAshed.App"
-             StartupUri="MainWindow.xaml">
+             xmlns:local="clr-namespace:WAshed.App">
     <Application.Resources>
-         
     </Application.Resources>
 </Application>
