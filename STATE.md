@@ -9,7 +9,20 @@
 
 ## Last session summary
 
-**Debugging session** — tray icon still not visible during v0.1.0 smoke testing despite prior fixes (icon file present on disk, no crash log written, process alive at ~164 MB). Added step-by-step diagnostic instrumentation to pinpoint exactly where initialization silently stalls.
+**Library swap** — H.NotifyIcon.Wpf replaced with Hardcodet.NotifyIcon.Wpf 2.0.1.
+
+Diagnostic evidence from the previous session's `washed-startup.log` proved conclusively that our code was correct: the .ico file existed on disk, `BitmapImage` loaded with real 32×32 dimensions, `TaskbarIcon` was constructed, `IconSource` was assigned, `Visibility` was forced to `Visible`, and the `System.Drawing.Icon` fallback also succeeded — yet no icon ever appeared in the system tray. The bug is inside H.NotifyIcon or its interaction with the Windows shell notification area on at least one tested machine. Swapped to Hardcodet.NotifyIcon.Wpf (the original project that H.NotifyIcon forked from), which is more mature and widely deployed.
+
+### Changed
+- `WAshed.App.csproj`: Replaced `H.NotifyIcon.Wpf 2.1.0` with `Hardcodet.NotifyIcon.Wpf 2.0.1`.
+- `TrayIconHost.cs`: Updated `using H.NotifyIcon;` → `using Hardcodet.Wpf.TaskbarNotification;`. All other code is unchanged — the `TaskbarIcon` API (`IconSource`, `Icon`, `ToolTipText`, `ContextMenu`, `Visibility`, `Dispose`) is identical between the two libraries.
+- All diagnostic logging and the `System.Drawing.Icon` fallback retained unchanged.
+
+**All 39 tests still green (17 WAshed.App.Tests + 22 WAshed.Core.Tests). Build 0 errors, 0 warnings (1 platform warning only when building project directly, not via sln).**
+
+---
+
+**Previous session — Debugging session** — tray icon still not visible during v0.1.0 smoke testing despite prior fixes (icon file present on disk, no crash log written, process alive at ~164 MB). Added step-by-step diagnostic instrumentation to pinpoint exactly where initialization silently stalls.
 
 ### Added — Startup diagnostic log (`washed-startup.log`)
 - New `src/WAshed.App/Diagnostics/StartupLog.cs`: `Info`/`Warn` methods, ISO 8601 timestamps with milliseconds, append-mode with flush-per-write, truncated on each app start so the file always reflects the most recent run.
@@ -111,8 +124,7 @@ Previous session: Shipped the two remaining pieces blocking the first end-to-end
 
 ## Next up
 
-**End-to-end smoke test on real hardware (resumed):**
-Launch `WAshed.App`, confirm tray icon appears, open WhatsApp Desktop, press the hotkey (Ctrl+Shift+B), verify blur appears over the WhatsApp window. File any issues found as the v0.2.0 backlog ("The right regions").
+**End-to-end smoke test resumed:** run the app, confirm tray icon appears in the system tray, then proceed with hotkey and blur tests. If the icon appears, strip diagnostics (remove `StartupLog` calls and `StartupLog.cs`). If it still fails, the problem is in the Windows shell itself (e.g., notification area overflow, icon caching) rather than the library.
 
 ## Blockers
 
@@ -122,6 +134,7 @@ None.
 
 (See `PLAN.md` Decisions Log for the full history.)
 
+- **Tray library = Hardcodet.NotifyIcon.Wpf** (not H.NotifyIcon.Wpf). Rationale: H.NotifyIcon silently failed to register the icon with the Windows shell notification area on at least one tested machine despite all setup steps succeeding (file on disk, BitmapImage loaded, Icon property set, Visibility forced to Visible — all logged clean). Hardcodet's library is the more mature parent project (H.NotifyIcon is a fork of it) and is known to work reliably across Windows versions.
 - Solution pinned to x64 (Win2D requires a concrete platform; ARM64 support deferred to post-v1).
 - IDE = VS2022 throughout (driver dev in v1 requires it)
 - Claude Code workflow = terminal alongside VS2022, not as IDE extension
