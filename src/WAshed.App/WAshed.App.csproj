@@ -19,7 +19,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Resource Include="Assets\tray-icon.ico" />
+    <Content Include="Assets\tray-icon.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
   <ItemGroup>
