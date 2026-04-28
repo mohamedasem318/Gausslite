@@ -9,50 +9,45 @@
 
 ## Last session summary
 
-Built the `OverlayWindow` module in `src/WAshed.Overlay/`:
+Built the `TrayApp` orchestration in `src/WAshed.App/`:
 
-- `WAshed.Overlay.csproj` upgraded from bare `net8.0` to `net8.0-windows10.0.19041.0` with
-  `<UseWPF>`, `<AllowUnsafeBlocks>`, `<WindowsPackageType>None</WindowsPackageType>`, and
-  `<EnableCoreMrtTooling>false</EnableCoreMrtTooling>` (matches the pattern established for
-  WAshed.Core). Added `SharpDX` + `SharpDX.Direct3D9` 4.2.0 for D3D9Ex managed wrappers.
-  Added `ProjectReference` to `WAshed.Core`.
-- `INativeBlurRenderTarget` (new, `WAshed.Core.Blur`) — secondary interface that concrete
-  Win2D `IBlurRenderTarget` implementations will also implement; exposes
-  `IDirect3DSurface GetDirect3DSurface()` so the bridge can extract the underlying D3D11
-  texture. Must live in Core (not Overlay) to avoid a circular project reference.
-- `IOverlayWindow` — public interface: `Show()`, `Hide()`, `SetBounds(Rect)`,
-  `PresentFrame(IBlurRenderTarget)`, `Dispose()`.
-- `ID3DImageBridge` (internal) — seam isolating D3D9/DXGI concerns from WPF window logic.
-  `UpdateD3DImage(D3DImage, IBlurRenderTarget)` is the single method.
-- `ComInterop.cs` — `[ComImport]` definitions for `IDirect3DDxgiInterfaceAccess` (bridges
-  WinRT `IDirect3DSurface` to native DXGI) and `IDXGIResource` (vtable-correct, including
-  inherited IDXGIObject + IDXGIDeviceSubObject stubs). Both are internal.
-- `NativeWindow.cs` — `GetWindowLong`/`SetWindowLong` P/Invoke plus the three extended-style
-  constants (`WS_EX_LAYERED`, `WS_EX_TRANSPARENT`, `WS_EX_TOOLWINDOW`).
-- `D3DImageBridge` — creates a D3D9Ex device once (1×1 windowed, desktop HWND); on each
-  `UpdateD3DImage` call: casts `IBlurRenderTarget` to `INativeBlurRenderTarget`, walks the
-  WinRT→DXGI chain (`IWinRTObject.NativeObject.ThisPtr` → `IDirect3DDxgiInterfaceAccess` →
-  `ID3D11Texture2D` → `IDXGIResource.GetSharedHandle`) to obtain the D3D11 shared handle,
-  imports it as a `SharpDX.Direct3D9.Texture`, and sets `IDirect3DSurface9` as the
-  `D3DImage` back buffer. Degrades gracefully (no-op) if the render target doesn't implement
-  `INativeBlurRenderTarget` or the texture lacks `DXGI_RESOURCE_MISC_SHARED`.
-- `OverlayWindow` — `WindowStyle=None`, `AllowsTransparency=true`, `Background=Transparent`,
-  `Topmost=true`, `ShowInTaskbar=false`. Applies `WS_EX_TRANSPARENT | WS_EX_LAYERED |
-  WS_EX_TOOLWINDOW` in the `SourceInitialized` handler (once the HWND exists). `PresentFrame`
-  dispatches to the WPF UI thread via `Dispatcher.Invoke`. Public constructor takes no args;
-  internal constructor accepts `ID3DImageBridge` for injection.
-- All 19 existing xUnit tests still green; solution builds with 0 errors.
+- `WAshed.App.csproj` upgraded to `net8.0-windows10.0.19041.0` with `<UseWPF>`,
+  `<WindowsPackageType>None</WindowsPackageType>`, `<EnableCoreMrtTooling>false</EnableCoreMrtTooling>`,
+  and `<ApplicationManifest>app.manifest</ApplicationManifest>`. Added `H.NotifyIcon.Wpf 2.1.0`
+  and `ProjectReference`s to `WAshed.Core` and `WAshed.Overlay`.
+- `app.manifest` — Per-Monitor V2 DPI awareness (`PerMonitorV2`), required for
+  `OverlayWindow.SetBounds` to align correctly with `WindowTracker` bounds on high-DPI monitors.
+- `App.xaml` — removed `StartupUri`; `ShutdownMode` set to `OnExplicitShutdown` in `OnStartup`.
+  `MainWindow.xaml` / `MainWindow.xaml.cs` deleted.
+- `ITrayOrchestrator` / `TrayOrchestrator` — wires `IWindowTracker`, `ICaptureEngine`,
+  `IBlurPipeline`, `IOverlayWindow`, `IHotkeyService`, `ICaptureItemFactory`; public surface:
+  `ToggleBlur()`, `EnableBlur()`, `DisableBlur()`, `IsBlurEnabled`, `BlurStateChanged`, `Dispose()`;
+  tracks blur state and capture-started state; on `BoundsChanged` propagates `SetBounds` and
+  lazily starts capture if WhatsApp appears after blur is enabled.
+- `ICaptureItemFactory` / `CaptureItemFactory` — `bool TryCreateForWhatsApp(out GraphicsCaptureItem? item)`;
+  concrete implementation finds the WhatsApp HWND via `IWin32Api`; the
+  `IGraphicsCaptureItemInterop` activation-factory path is stubbed out with a
+  TODO because `WindowsRuntimeMarshal.GetActivationFactory` was removed in .NET 6+
+  (fix in next session alongside the Win2D render target).
+- `TrayIconHost` — wraps `H.NotifyIcon.Wpf TaskbarIcon`; context menu: "Enable blur"
+  (checkable, synced via `BlurStateChanged`), separator, "Exit"; placeholder 16×16 teal icon
+  rendered via `RenderTargetBitmap`; TODO for real icon.
+- `HotkeyService` / `IHotkeyService` — registers Ctrl+Shift+B via `RegisterHotKey` P/Invoke;
+  uses an `HwndSource` HWND_MESSAGE window to receive `WM_HOTKEY`; fires on WPF UI thread.
+- `App.xaml.cs` — composition root; `NullCaptureEngine` and `NullBlurPipeline` null-objects
+  hold the place of the not-yet-built Win2D pipeline until next session.
+- `tests/WAshed.App.Tests/` — new xUnit test project; 15 tests covering `TrayOrchestrator`:
+  enable order, disable order, hotkey toggle (both directions), bounds-changed propagation,
+  lazy capture start when WhatsApp appears after blur is enabled, double-enable no-op, dispose
+  idempotent, dispose stops everything, dispose releases pipeline and overlay.
+- All 34 tests green (19 pre-existing + 15 new); build 0 errors.
 
 ## Next up
 
-**Build the `TrayApp` orchestration** in `WAshed.App` per the v0.1.0 milestone.
-
-Responsibilities:
-- `App.xaml.cs`: suppress the default main window, create a system-tray icon
-- Wire `WindowTracker`, `CaptureEngine`, `BlurPipeline`, `OverlayWindow` together
-- Tray menu: "Enable blur" toggle, hotkey (to be decided), "Exit"
-- Per-monitor V2 DPI awareness manifest entry (required for `OverlayWindow.SetBounds` to
-  align correctly with `WindowTracker` bounds)
+**Build the concrete Win2D `IBlurRenderTarget` wrapper** in `WAshed.Core/Blur` with
+`DXGI_RESOURCE_MISC_SHARED` so the `OverlayWindow` bridge can produce a real shared texture.
+Also implement `CaptureItemFactory.TryCreateForWhatsApp` via P/Invoke to `RoGetActivationFactory`
+(replaces the stubbed TODO). Together these two unblock the first end-to-end smoke test.
 
 ## Blockers
 
@@ -71,3 +66,8 @@ None.
 - The concrete Win2D `IBlurRenderTarget` wrapper has not been written yet (GPU/smoke-test
   code); its `CanvasRenderTarget` must be created with `DXGI_RESOURCE_MISC_SHARED` for the
   shared-handle bridge to succeed at runtime.
+- `CaptureItemFactory.TryCreateForWhatsApp` is stubbed (returns false) because
+  `WindowsRuntimeMarshal.GetActivationFactory` was removed in .NET 6+; the real
+  `IGraphicsCaptureItemInterop` path via `RoGetActivationFactory` P/Invoke is next session.
+- `NullCaptureEngine` and `NullBlurPipeline` null-objects live in `App.xaml.cs`
+  (composition root) until the real Win2D pipeline is built.
