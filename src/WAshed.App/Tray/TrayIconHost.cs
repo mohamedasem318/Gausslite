@@ -4,6 +4,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media.Imaging;
 using H.NotifyIcon;
+using WAshed.App.Diagnostics;
 using WAshed.App.Orchestration;
 
 namespace WAshed.App.Tray;
@@ -23,20 +24,52 @@ internal sealed class TrayIconHost : IDisposable
 
     public void Initialize()
     {
+        StartupLog.Info("TrayIconHost.Initialize: entry");
+
         var iconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "tray-icon.ico");
-        if (!File.Exists(iconPath))
+        StartupLog.Info($"TrayIconHost.Initialize: iconPath = {iconPath}");
+
+        bool fileExists = File.Exists(iconPath);
+        StartupLog.Info($"TrayIconHost.Initialize: File.Exists = {fileExists}");
+
+        if (!fileExists)
         {
             var msg = $"Tray icon not found at: {iconPath}. Build did not copy Assets/tray-icon.ico to output directory.";
             Debug.WriteLine($"[WAshed] ERROR: {msg}");
+            StartupLog.Warn($"TrayIconHost.Initialize: {msg}");
             throw new FileNotFoundException(msg, iconPath);
         }
 
+        StartupLog.Info("TrayIconHost.Initialize: creating BitmapImage...");
         var iconImage = new BitmapImage(new Uri(iconPath, UriKind.Absolute));
+        StartupLog.Info($"TrayIconHost.Initialize: BitmapImage created, IsFrozen={iconImage.IsFrozen}, PixelWidth={iconImage.PixelWidth}, PixelHeight={iconImage.PixelHeight}");
+
+        StartupLog.Info("TrayIconHost.Initialize: creating TaskbarIcon...");
         _taskbarIcon = new TaskbarIcon
         {
             ToolTipText = "WAshed",
-            IconSource = iconImage
         };
+
+        StartupLog.Info("TrayIconHost.Initialize: assigning IconSource...");
+        _taskbarIcon.IconSource = iconImage;
+        StartupLog.Info("TrayIconHost.Initialize: TaskbarIcon created and configured");
+        StartupLog.Info($"TrayIconHost.Initialize: TaskbarIcon.Visibility = {_taskbarIcon.Visibility}");
+
+        _taskbarIcon.Visibility = Visibility.Visible;
+        StartupLog.Info("TrayIconHost.Initialize: Visibility forced to Visible");
+
+        // Fallback: assign a native HICON via System.Drawing.Icon, which bypasses the
+        // WPF imaging path entirely. H.NotifyIcon can consume either; if BitmapImage
+        // conversion silently fails, this path may succeed.
+        try
+        {
+            _taskbarIcon.Icon = new System.Drawing.Icon(iconPath);
+            StartupLog.Info("TrayIconHost.Initialize: System.Drawing.Icon fallback set successfully");
+        }
+        catch (Exception ex)
+        {
+            StartupLog.Warn($"TrayIconHost.Initialize: System.Drawing.Icon fallback failed: {ex.Message}", ex);
+        }
 
         _toggleItem = new MenuItem
         {
@@ -56,6 +89,7 @@ internal sealed class TrayIconHost : IDisposable
         _taskbarIcon.ContextMenu = menu;
 
         _orchestrator.BlurStateChanged += OnBlurStateChanged;
+        StartupLog.Info("TrayIconHost.Initialize: exit");
     }
 
     private void OnBlurStateChanged(object? sender, bool isEnabled)
