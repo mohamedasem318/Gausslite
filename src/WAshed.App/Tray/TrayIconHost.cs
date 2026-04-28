@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media.Imaging;
@@ -21,11 +23,19 @@ internal sealed class TrayIconHost : IDisposable
 
     public void Initialize()
     {
+        var iconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "tray-icon.ico");
+        if (!File.Exists(iconPath))
+        {
+            var msg = $"Tray icon not found at: {iconPath}. Build did not copy Assets/tray-icon.ico to output directory.";
+            Debug.WriteLine($"[WAshed] ERROR: {msg}");
+            throw new FileNotFoundException(msg, iconPath);
+        }
+
+        var iconImage = new BitmapImage(new Uri(iconPath, UriKind.Absolute));
         _taskbarIcon = new TaskbarIcon
         {
             ToolTipText = "WAshed",
-            // TODO: consider a higher-resolution icon asset for HiDPI displays
-            IconSource = new BitmapImage(new Uri("pack://application:,,,/Assets/tray-icon.ico"))
+            IconSource = iconImage
         };
 
         _toggleItem = new MenuItem
