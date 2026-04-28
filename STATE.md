@@ -9,29 +9,33 @@
 
 ## Last session summary
 
-Built the `CaptureEngine` module in `src/WAshed.Core/Capture/`:
+Built the `BlurPipeline` module in `src/WAshed.Core/Blur/`:
 
-- Both csproj TFMs bumped to `net8.0-windows10.0.19041.0` to unlock
-  `Windows.Graphics.Capture` (including `CreateFreeThreaded`, added in build 19041)
-- `ICaptureInterop` — seam for three factory-level WinRT calls:
-  `CreateDirect3DDevice`, `CreateFreeThreadedFramePool`, and `CreateSession`
-- `ICaptureFramePool` / `ICaptureSession` / `ICaptureFrame` — thin mockable wrappers
-  over the sealed WinRT runtime classes; all implement `IDisposable`
-- `ICaptureEngine` — public interface: `Start(GraphicsCaptureItem)`, `Stop()`,
-  `IsCapturing`, and `FrameArrived` (fires on thread-pool thread; callers must not
-  retain the frame after the handler returns)
-- `CaptureEngine` — implementation: free-threaded pool, disposes frame in `finally`
-  after raising `FrameArrived`, `Start` throws if already capturing, `Stop` is idempotent
-- 5 xUnit tests in `tests/WAshed.Core.Tests/Capture/CaptureEngineTests.cs` using
-  NSubstitute — all 11 tests (6 existing + 5 new) green
+- `Microsoft.Graphics.Win2D` 1.3.0 added to `WAshed.Core.csproj`. Win2D's transitive
+  dependency on `Microsoft.WindowsAppSDK` injects `MrtCore.PriGen.targets` which
+  requires VS2022 AppxPackage DLLs not present in the dotnet CLI SDK. Fixed by setting
+  `<EnableCoreMrtTooling>false</EnableCoreMrtTooling>` in both `WAshed.Core.csproj` and
+  `WAshed.Core.Tests.csproj` (class library needs no PRI resource packaging).
+- `IBlurInterop` — seam for four Win2D factory-level operations: `CreateCanvasDevice`,
+  `CreateRenderTarget`, `DrawBlur`, and `GetFrameSize` (frame dimension extraction)
+- `IBlurCanvasDevice` / `IBlurRenderTarget` — thin mockable wrappers so no Win2D types
+  leak into the public interface
+- `IBlurPipeline` — public interface: `Initialize(IDirect3DDevice)`, `BlurFrame(ICaptureFrame)`
+  returns `IBlurRenderTarget`, and `BlurRadius { get; set; }`
+- `BlurPipeline` — concrete implementation with `DefaultBlurRadius = 20.0f`; device
+  created at `Initialize`, render target allocated lazily on first `BlurFrame` and
+  reallocated only when frame dimensions change; `BlurFrame` before init throws
+  `InvalidOperationException`; after dispose throws `ObjectDisposedException`; `Dispose`
+  is idempotent
+- 8 xUnit tests in `tests/WAshed.Core.Tests/Blur/BlurPipelineTests.cs` using NSubstitute
+  — all 19 tests (11 existing + 8 new) green
 
 ## Next up
 
-**Build the `BlurPipeline` module** (`src/WAshed.Core/Blur/`).
+**Build the `OverlayWindow` module** (`src/WAshed.Overlay/`).
 
-Win2D-based pipeline that receives `ICaptureFrame` from `CaptureEngine`, blurs the
-entire captured texture (region-aware blurring comes in v0.2.0), and exposes the
-result for `OverlayWindow` to render via D3DImage.
+Transparent always-on-top WPF window that hosts a `D3DImage` and renders the blurred
+output from `BlurPipeline`.
 
 ## Blockers
 
