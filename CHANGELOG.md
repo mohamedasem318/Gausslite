@@ -8,8 +8,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- CaptureEngine module: wraps Windows.Graphics.Capture to deliver per-frame textures via a free-threaded FrameArrived event; all WinRT factory calls are behind ICaptureInterop for unit-test isolation
 - WindowTracker module: tracks WhatsApp Desktop window bounds at 10 Hz with per-monitor DPI awareness
-- Project scaffolding and planning documents
-
-### Added
 - Project scaffolding and planning documents
