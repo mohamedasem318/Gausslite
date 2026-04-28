@@ -3,7 +3,7 @@ using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media.Imaging;
-using H.NotifyIcon;
+using Hardcodet.Wpf.TaskbarNotification;
 using WAshed.App.Diagnostics;
 using WAshed.App.Orchestration;
 
