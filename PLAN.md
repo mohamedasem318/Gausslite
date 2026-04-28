@@ -140,3 +140,19 @@ Append-only. One line per decision with date and rationale.
 - 2026-04-28: Repo private until v0.1.0 ships, then public.
 - 2026-04-28: macOS parked-but-architected. Platform-specific code lives
   behind interfaces so a future port doesn't require core rewrites.
+
+## Per-session checklist
+
+Every Claude Code session that ships a module must end with:
+
+1. All tests pass (`dotnet test` green)
+2. `STATE.md` updated:
+   - "Last session summary" reflects what was just built
+   - "Next up" set to the next module per the module map
+   - Decisions/notes added if anything non-obvious happened
+3. `CHANGELOG.md` updated:
+   - One concise entry under `[Unreleased]` → `### Added` (or `### Changed`, `### Fixed`, etc.)
+   - User-facing language, not implementation detail
+   - Example: `WindowTracker module: tracks WhatsApp Desktop window bounds at 10 Hz with DPI awareness`
+4. Conventional-commit message proposed for the changes
+5. No auto-commits — user reviews and commits manually
