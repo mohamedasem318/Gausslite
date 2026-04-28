@@ -9,35 +9,29 @@
 
 ## Last session summary
 
-Built the `WindowTracker` module in `src/WAshed.Core/WindowTracking/`:
+Built the `CaptureEngine` module in `src/WAshed.Core/Capture/`:
 
-- `RECT` struct (Win32 layout)
-- `IWin32Api` interface wrapping all P/Invoke calls
-- `Win32Api` concrete implementation using `GetWindowRect`, `GetDpiForWindow`, and
-  `Process.GetProcessesByName` / `MainWindowHandle`
-- `IWindowTracker` interface with `BoundsChanged` event, `CurrentBounds`, `IsTracking`,
-  `Start()`, and `Stop()`
-- `WindowTracker` implementation: 10 Hz background polling, DPI-aware logical→physical
-  pixel conversion, fires `BoundsChanged` only on actual bounds changes
-- 6 xUnit tests in `tests/WAshed.Core.Tests/WindowTracking/WindowTrackerTests.cs` using
-  NSubstitute — all green
-
-Both `WAshed.Core` and `WAshed.Core.Tests` now target `net8.0-windows` with `UseWPF`
-enabled so `System.Windows.Rect` resolves.
+- Both csproj TFMs bumped to `net8.0-windows10.0.19041.0` to unlock
+  `Windows.Graphics.Capture` (including `CreateFreeThreaded`, added in build 19041)
+- `ICaptureInterop` — seam for three factory-level WinRT calls:
+  `CreateDirect3DDevice`, `CreateFreeThreadedFramePool`, and `CreateSession`
+- `ICaptureFramePool` / `ICaptureSession` / `ICaptureFrame` — thin mockable wrappers
+  over the sealed WinRT runtime classes; all implement `IDisposable`
+- `ICaptureEngine` — public interface: `Start(GraphicsCaptureItem)`, `Stop()`,
+  `IsCapturing`, and `FrameArrived` (fires on thread-pool thread; callers must not
+  retain the frame after the handler returns)
+- `CaptureEngine` — implementation: free-threaded pool, disposes frame in `finally`
+  after raising `FrameArrived`, `Start` throws if already capturing, `Stop` is idempotent
+- 5 xUnit tests in `tests/WAshed.Core.Tests/Capture/CaptureEngineTests.cs` using
+  NSubstitute — all 11 tests (6 existing + 5 new) green
 
 ## Next up
 
-**Build the `CaptureEngine` module** (`src/WAshed.Core/Capture/`).
+**Build the `BlurPipeline` module** (`src/WAshed.Core/Blur/`).
 
-Wraps `Windows.Graphics.Capture` (WinRT) to expose per-frame `IDirect3DSurface`
-textures. Public API:
-
-- `ICaptureEngine` interface with `Start(GraphicsCaptureItem)`, `Stop()`, and a
-  `FrameArrived` event carrying the `Direct3D11CaptureFrame`
-- Default `CaptureEngine` class using `GraphicsCaptureSession` +
-  `Direct3D11CaptureFramePool`
-- Wrap any WinRT/interop surface behind `ICaptureInterop` for unit-test seams
-- Tests in `tests/WAshed.Core.Tests/Capture/` using NSubstitute
+Win2D-based pipeline that receives `ICaptureFrame` from `CaptureEngine`, blurs the
+entire captured texture (region-aware blurring comes in v0.2.0), and exposes the
+result for `OverlayWindow` to render via D3DImage.
 
 ## Blockers
 
