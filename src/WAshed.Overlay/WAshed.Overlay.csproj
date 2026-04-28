@@ -1,9 +1,25 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <UseWPF>true</UseWPF>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Required for unpackaged WinAppSDK/Win2D (transitive via WAshed.Core) -->
+    <WindowsPackageType>None</WindowsPackageType>
+    <!-- Suppress MRT Core PRI-generation tooling (no resource packaging needed) -->
+    <EnableCoreMrtTooling>false</EnableCoreMrtTooling>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- D3D9Ex managed wrappers for the D3DImage shared-surface bridge -->
+    <PackageReference Include="SharpDX" Version="4.2.0" />
+    <PackageReference Include="SharpDX.Direct3D9" Version="4.2.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\WAshed.Core\WAshed.Core.csproj" />
+  </ItemGroup>
 
 </Project>
