@@ -3,6 +3,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Threading;
+using WAshed.App.Diagnostics;
 using WAshed.App.Hotkey;
 using WAshed.App.Orchestration;
 using WAshed.App.Tray;
@@ -24,6 +25,7 @@ public partial class App : Application
 
     protected override void OnStartup(StartupEventArgs e)
     {
+        StartupLog.Info("OnStartup begin");
         base.OnStartup(e);
         ShutdownMode = ShutdownMode.OnExplicitShutdown;
 
@@ -58,16 +60,49 @@ public partial class App : Application
 
         _hotkeyService = new HotkeyService();
 
-        _orchestrator = new TrayOrchestrator(
-            windowTracker,
-            captureEngine,
-            blurPipeline,
-            overlayWindow,
-            _hotkeyService,
-            captureItemFactory);
+        try
+        {
+            StartupLog.Info("Constructing TrayOrchestrator...");
+            _orchestrator = new TrayOrchestrator(
+                windowTracker,
+                captureEngine,
+                blurPipeline,
+                overlayWindow,
+                _hotkeyService,
+                captureItemFactory);
+            StartupLog.Info("TrayOrchestrator constructed.");
+        }
+        catch (Exception ex)
+        {
+            StartupLog.Warn("TrayOrchestrator construction threw.", ex);
+            throw;
+        }
 
-        _trayIconHost = new TrayIconHost(_orchestrator);
-        _trayIconHost.Initialize();
+        try
+        {
+            StartupLog.Info("Constructing TrayIconHost...");
+            _trayIconHost = new TrayIconHost(_orchestrator);
+            StartupLog.Info("TrayIconHost constructed.");
+        }
+        catch (Exception ex)
+        {
+            StartupLog.Warn("TrayIconHost construction threw.", ex);
+            throw;
+        }
+
+        try
+        {
+            StartupLog.Info("Initializing tray icon...");
+            _trayIconHost.Initialize();
+            StartupLog.Info("Tray icon Initialize() returned.");
+        }
+        catch (Exception ex)
+        {
+            StartupLog.Warn("TrayIconHost.Initialize() threw.", ex);
+            throw;
+        }
+
+        StartupLog.Info("OnStartup complete.");
     }
 
     private static void LogCrash(Exception? ex, bool fatal)
