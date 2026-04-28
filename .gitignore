@@ -1,0 +1,61 @@
+# Visual Studio
+.vs/
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+*.user
+*.suo
+*.cache
+*.pdb
+*.opensdf
+*.sdf
+*.tlog
+*.lastbuildstate
+*.unsuccessfulbuild
+
+# .NET
+*.dll
+*.exe
+*.config
+project.lock.json
+project.fragment.lock.json
+artifacts/
+**/Properties/launchSettings.json
+
+# NuGet
+*.nupkg
+*.snupkg
+**/packages/*
+!**/packages/build/
+*.nuget.props
+*.nuget.targets
+
+# Rider
+.idea/
+*.sln.iml
+
+# OS
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+
+# Build outputs
+publish/
+out/
+
+# Tests
+TestResults/
+*.coverage
+*.coveragexml
+
+# Local env
+*.local
+.env
+.env.local
+secrets.json
+
+# WAshed-specific
+installer/Output/
+*.signed
