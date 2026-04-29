@@ -1,4 +1,5 @@
 using System.Windows;
+using WAshed.Core.Diagnostics;
 
 namespace WAshed.Core.WindowTracking;
 
@@ -11,6 +12,11 @@ public sealed class WindowTracker : IWindowTracker, IDisposable
     private CancellationTokenSource? _cts;
     private Task? _pollTask;
     private Rect? _lastKnownBounds;
+
+    // Diagnostic state — written from poll thread only (no locking needed).
+    private bool _firstWindowFound;
+    private bool _firstBoundsChangeLogged;
+    private bool _notFoundWarningLogged;
 
     public event EventHandler<Rect>? BoundsChanged;
     public Rect? CurrentBounds { get; private set; }
@@ -39,6 +45,8 @@ public sealed class WindowTracker : IWindowTracker, IDisposable
 
     private async Task PollLoop(CancellationToken ct)
     {
+        var loopStart = DateTime.UtcNow;
+
         while (!ct.IsCancellationRequested)
         {
             try
@@ -50,25 +58,44 @@ public sealed class WindowTracker : IWindowTracker, IDisposable
                 break;
             }
 
-            var bounds = SampleBounds();
-            CurrentBounds = bounds;
+            var sample = SampleBoundsWithHandle();
+            CurrentBounds = sample?.Bounds;
 
-            if (bounds.HasValue)
+            if (sample.HasValue)
             {
-                if (!_lastKnownBounds.HasValue || bounds.Value != _lastKnownBounds.Value)
+                if (!_firstWindowFound)
                 {
-                    _lastKnownBounds = bounds.Value;
-                    BoundsChanged?.Invoke(this, bounds.Value);
+                    _firstWindowFound = true;
+                    DiagLog.Info($"WindowTracker: WhatsApp window detected, HWND=0x{sample.Value.Hwnd:X}, bounds={sample.Value.Bounds}");
+                }
+
+                if (!_lastKnownBounds.HasValue || sample.Value.Bounds != _lastKnownBounds.Value)
+                {
+                    if (!_firstBoundsChangeLogged)
+                    {
+                        _firstBoundsChangeLogged = true;
+                        DiagLog.Info($"WindowTracker: bounds changed to {sample.Value.Bounds}");
+                    }
+
+                    _lastKnownBounds = sample.Value.Bounds;
+                    BoundsChanged?.Invoke(this, sample.Value.Bounds);
                 }
             }
             else
             {
                 _lastKnownBounds = null;
+
+                if (!_firstWindowFound && !_notFoundWarningLogged
+                    && (DateTime.UtcNow - loopStart).TotalSeconds > 5)
+                {
+                    _notFoundWarningLogged = true;
+                    DiagLog.Warn("WindowTracker: WhatsApp not found after 5 seconds — capture cannot start");
+                }
             }
         }
     }
 
-    private Rect? SampleBounds()
+    private (Rect Bounds, IntPtr Hwnd)? SampleBoundsWithHandle()
     {
         foreach (var name in WhatsAppProcessNames)
         {
@@ -79,7 +106,7 @@ public sealed class WindowTracker : IWindowTracker, IDisposable
                 if (_win32.GetWindowRect(hwnd, out var rect))
                 {
                     var dpi = _win32.GetDpiForWindow(hwnd);
-                    return ToPhysicalRect(rect, dpi);
+                    return (ToPhysicalRect(rect, dpi), hwnd);
                 }
             }
         }
