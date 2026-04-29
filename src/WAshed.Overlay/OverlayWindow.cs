@@ -29,9 +29,11 @@ namespace WAshed.Overlay;
 public sealed class OverlayWindow : IOverlayWindow
 {
     private readonly Window        _window;
+    private readonly Grid          _contentRoot;
     private readonly Image         _image;
     private readonly D3DImage      _d3dImage;
     private readonly ID3DImageBridge _bridge;
+    private Rect? _requestedBounds;
     private bool _disposed;
 
     private int _presentFrameCount;
@@ -54,16 +56,19 @@ public sealed class OverlayWindow : IOverlayWindow
             Stretch             = Stretch.Fill,
         };
 
-        var contentRoot = new Grid
+        _contentRoot = new Grid
         {
             HorizontalAlignment = HorizontalAlignment.Stretch,
             VerticalAlignment   = VerticalAlignment.Stretch,
         };
-        contentRoot.Children.Add(_image);
+        _contentRoot.Children.Add(_image);
 
         _window = new Window
         {
+            WindowStartupLocation = WindowStartupLocation.Manual,
+            WindowState       = WindowState.Normal,
             WindowStyle       = WindowStyle.None,
+            ResizeMode        = ResizeMode.NoResize,
             SizeToContent     = SizeToContent.Manual,
             AllowsTransparency = true,
             Background        = Brushes.Transparent,
@@ -74,7 +79,7 @@ public sealed class OverlayWindow : IOverlayWindow
             Top    = 0,
             Width  = 0,
             Height = 0,
-            Content = contentRoot,
+            Content = _contentRoot,
         };
 
         // SourceInitialized fires once, after the HWND has been created (on Show()).
@@ -94,6 +99,9 @@ public sealed class OverlayWindow : IOverlayWindow
                 |  NativeWindow.WS_EX_TOOLWINDOW;
 
         NativeWindow.SetWindowLong(hwnd, NativeWindow.GWL_EXSTYLE, exStyle);
+
+        if (_requestedBounds.HasValue)
+            ApplyBounds(_requestedBounds.Value, "SourceInitialized");
     }
 
     /// <inheritdoc/>
@@ -104,11 +112,18 @@ public sealed class OverlayWindow : IOverlayWindow
         var hwnd = new WindowInteropHelper(_window).Handle;
         DiagLog.Info($"OverlayWindow.Show: window shown, HWND=0x{hwnd:X}, IsVisible={_window.IsVisible}");
 
+        if (_requestedBounds.HasValue)
+            ApplyBounds(_requestedBounds.Value, "Show post-HWND");
+
         if (Interlocked.Exchange(ref _visualTreeLogged, 1) == 0)
             DiagLog.Info($"OverlayWindow.Show: visual tree = {DescribeVisualTree()}");
 
         _window.Dispatcher.BeginInvoke(
-            () => DiagLog.Info($"OverlayWindow.Show: post-show image size = {_image.ActualWidth:0.#}x{_image.ActualHeight:0.#}"),
+            () => DiagLog.Info(
+                "OverlayWindow.Show: post-show window size = " +
+                $"Window={_window.ActualWidth:0.#}x{_window.ActualHeight:0.#}, " +
+                $"Grid={_contentRoot.ActualWidth:0.#}x{_contentRoot.ActualHeight:0.#}, " +
+                $"Image={_image.ActualWidth:0.#}x{_image.ActualHeight:0.#}"),
             DispatcherPriority.Loaded);
     }
 
@@ -119,6 +134,14 @@ public sealed class OverlayWindow : IOverlayWindow
     public void SetBounds(Rect bounds)
     {
         DiagLog.Info($"OverlayWindow.SetBounds: setting to Left={bounds.Left}, Top={bounds.Top}, Width={bounds.Width}, Height={bounds.Height}");
+        _requestedBounds = bounds;
+        ApplyBounds(bounds, "SetBounds");
+    }
+
+    private void ApplyBounds(Rect bounds, string reason)
+    {
+        DiagLog.Info($"OverlayWindow.ApplyBounds ({reason}): Left={bounds.Left}, Top={bounds.Top}, Width={bounds.Width}, Height={bounds.Height}");
+        _window.SizeToContent = SizeToContent.Manual;
         _window.Left   = bounds.Left;
         _window.Top    = bounds.Top;
         _window.Width  = bounds.Width;

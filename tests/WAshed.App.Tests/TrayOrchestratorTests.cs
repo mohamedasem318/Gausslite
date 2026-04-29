@@ -194,6 +194,27 @@ public sealed class TrayOrchestratorTests
     }
 
     [Fact]
+    public void BoundsChanged_WhenWhatsAppLaterAppears_ReappliesBoundsAfterShow()
+    {
+        SetupWhatsAppNotRunning();
+        using var sut = CreateSut();
+        sut.EnableBlur();
+        var bounds = new Rect(0, 0, 800, 600);
+
+        // Now WhatsApp appears
+        SetupWhatsAppFound();
+        _windowTracker.BoundsChanged += Raise.Event<EventHandler<Rect>>(this, bounds);
+
+        Received.InOrder(() =>
+        {
+            _overlayWindow.SetBounds(bounds);
+            _captureEngine.Start(Arg.Any<GraphicsCaptureItem>());
+            _overlayWindow.Show();
+            _overlayWindow.SetBounds(bounds);
+        });
+    }
+
+    [Fact]
     public void DoubleEnable_IsNoOp()
     {
         SetupWhatsAppNotRunning();
