@@ -24,8 +24,8 @@ internal sealed class D3DImageBridge : ID3DImageBridge
     private readonly DeviceEx   _device;
     private bool _disposed;
 
-    // 0 = first UpdateD3DImage call not yet logged, 1 = logged.
-    private int _firstUpdateLogged;
+    // Update diagnostics are written from the UI thread but kept atomic for consistency.
+    private int _updateCallCount;
 
     public D3DImageBridge()
     {
@@ -58,32 +58,34 @@ internal sealed class D3DImageBridge : ID3DImageBridge
     {
         if (_disposed) return;
 
-        bool isFirst = Interlocked.Exchange(ref _firstUpdateLogged, 1) == 0;
+        int callNumber = Interlocked.Increment(ref _updateCallCount);
+        bool shouldLog = callNumber <= 5;
+        string prefix = $"[bridge call #{callNumber}]";
 
         try
         {
             if (blurTarget is not INativeBlurRenderTarget nativeTarget)
             {
-                if (isFirst)
-                    DiagLog.Warn("D3DImageBridge.UpdateD3DImage [first]: blurTarget does not implement INativeBlurRenderTarget — returning without update");
+                if (shouldLog)
+                    DiagLog.Warn($"{prefix} D3DImageBridge.UpdateD3DImage: blurTarget does not implement INativeBlurRenderTarget — returning without update");
                 return;
             }
 
-            if (isFirst) DiagLog.Info("D3DImageBridge.UpdateD3DImage [first]: acquiring IDirect3DSurface from render target...");
+            if (shouldLog) DiagLog.Info($"{prefix} D3DImageBridge.UpdateD3DImage: acquiring IDirect3DSurface from render target...");
             IDirect3DSurface direct3DSurface = nativeTarget.GetDirect3DSurface();
-            if (isFirst) DiagLog.Info("D3DImageBridge.UpdateD3DImage [first]: IDirect3DSurface acquired, beginning WinRT→DXGI unwrap...");
+            if (shouldLog) DiagLog.Info($"{prefix} D3DImageBridge.UpdateD3DImage: IDirect3DSurface acquired, beginning WinRT→DXGI unwrap...");
 
-            IntPtr sharedHandle = GetSharedHandleFromSurface(direct3DSurface, isFirst);
-            if (isFirst) DiagLog.Info($"D3DImageBridge.UpdateD3DImage [first]: GetSharedHandle returned 0x{sharedHandle:X16}");
+            IntPtr sharedHandle = GetSharedHandleFromSurface(direct3DSurface, shouldLog, callNumber);
+            if (shouldLog) DiagLog.Info($"{prefix} D3DImageBridge.UpdateD3DImage: GetSharedHandle returned 0x{sharedHandle:X16}");
 
             if (sharedHandle == IntPtr.Zero)
             {
-                if (isFirst)
-                    DiagLog.Warn("D3DImageBridge: ABORT — shared handle is zero, render target was not created with DXGI_RESOURCE_MISC_SHARED");
+                if (shouldLog)
+                    DiagLog.Warn($"{prefix} D3DImageBridge: ABORT — shared handle is zero, render target was not created with DXGI_RESOURCE_MISC_SHARED");
                 return;
             }
 
-            if (isFirst) DiagLog.Info("D3DImageBridge.UpdateD3DImage [first]: creating D3D9Ex texture via shared handle...");
+            if (shouldLog) DiagLog.Info($"{prefix} D3DImageBridge.UpdateD3DImage: creating D3D9Ex texture via shared handle...");
             using Texture texture9 = new(
                 _device,
                 width:       (int)blurTarget.Width,
@@ -96,16 +98,16 @@ internal sealed class D3DImageBridge : ID3DImageBridge
 
             using Surface surface9 = texture9.GetSurfaceLevel(0);
 
-            if (isFirst) DiagLog.Info("D3DImageBridge.UpdateD3DImage [first]: calling D3DImage.Lock / SetBackBuffer / Unlock...");
+            if (shouldLog) DiagLog.Info($"{prefix} D3DImageBridge.UpdateD3DImage: calling D3DImage.Lock / SetBackBuffer / Unlock...");
             d3dImage.Lock();
             d3dImage.SetBackBuffer(D3DResourceType.IDirect3DSurface9, surface9.NativePointer);
             d3dImage.AddDirtyRect(new Int32Rect(0, 0, (int)blurTarget.Width, (int)blurTarget.Height));
             d3dImage.Unlock();
-            if (isFirst) DiagLog.Info("D3DImageBridge.UpdateD3DImage [first]: SetBackBuffer completed successfully");
+            if (shouldLog) DiagLog.Info($"{prefix} D3DImageBridge.UpdateD3DImage: SetBackBuffer completed successfully");
         }
         catch (Exception ex)
         {
-            DiagLog.Warn("D3DImageBridge.UpdateD3DImage: exception during surface bridge operations", ex);
+            DiagLog.Warn($"{prefix} D3DImageBridge.UpdateD3DImage: exception during surface bridge operations", ex);
             // Do NOT re-throw — one bad frame must not crash the app.
         }
     }
@@ -115,28 +117,30 @@ internal sealed class D3DImageBridge : ID3DImageBridge
     /// underlying D3D11 texture.  Returns <see cref="IntPtr.Zero"/> on any failure
     /// (e.g. texture created without DXGI_RESOURCE_MISC_SHARED).
     /// </summary>
-    private static IntPtr GetSharedHandleFromSurface(IDirect3DSurface surface, bool log)
+    private static IntPtr GetSharedHandleFromSurface(IDirect3DSurface surface, bool log, int callNumber)
     {
+        string prefix = $"[bridge call #{callNumber}]";
+
         // CsWinRT projects all WinRT types as IWinRTObject, giving access to the
         // raw IInspectable* (which is also IUnknown*) without an extra AddRef.
         if (surface is not WinRT.IWinRTObject winrtObj)
         {
-            if (log) DiagLog.Warn("D3DImageBridge.GetSharedHandle: surface is not IWinRTObject — cannot unwrap");
+            if (log) DiagLog.Warn($"{prefix} D3DImageBridge.GetSharedHandle: surface is not IWinRTObject — cannot unwrap");
             return IntPtr.Zero;
         }
         if (winrtObj.NativeObject is not { } objRef)
         {
-            if (log) DiagLog.Warn("D3DImageBridge.GetSharedHandle: NativeObject is null");
+            if (log) DiagLog.Warn($"{prefix} D3DImageBridge.GetSharedHandle: NativeObject is null");
             return IntPtr.Zero;
         }
 
         IntPtr surfacePtr = objRef.ThisPtr; // borrowed — do NOT release
-        if (log) DiagLog.Info($"D3DImageBridge.GetSharedHandle [first]: surfacePtr=0x{surfacePtr:X16}");
+        if (log) DiagLog.Info($"{prefix} D3DImageBridge.GetSharedHandle: surfacePtr=0x{surfacePtr:X16}");
 
         // Step 1: QI for IDirect3DDxgiInterfaceAccess (AddRefs result)
         var dxgiAccessGuid = new Guid("A9B3D012-3DF2-4EE3-B8D1-8695F457D3C1");
         int hr = Marshal.QueryInterface(surfacePtr, ref dxgiAccessGuid, out IntPtr dxgiAccessPtr);
-        if (log) DiagLog.Info($"D3DImageBridge.GetSharedHandle [first]: QI IDirect3DDxgiInterfaceAccess hr=0x{hr:X8}");
+        if (log) DiagLog.Info($"{prefix} D3DImageBridge.GetSharedHandle: QI IDirect3DDxgiInterfaceAccess hr=0x{hr:X8}");
         if (hr < 0) return IntPtr.Zero;
 
         try
@@ -145,7 +149,7 @@ internal sealed class D3DImageBridge : ID3DImageBridge
 
             // Step 2: Ask for the underlying ID3D11Texture2D (returned pointer is AddRef'd)
             int tex2DHr = dxgiAccess.GetInterface(in IID_ID3D11Texture2D, out IntPtr texture2DPtr);
-            if (log) DiagLog.Info($"D3DImageBridge.GetSharedHandle [first]: GetInterface ID3D11Texture2D hr=0x{tex2DHr:X8}");
+            if (log) DiagLog.Info($"{prefix} D3DImageBridge.GetSharedHandle: GetInterface ID3D11Texture2D hr=0x{tex2DHr:X8}");
             if (tex2DHr < 0) return IntPtr.Zero;
 
             try
@@ -153,7 +157,7 @@ internal sealed class D3DImageBridge : ID3DImageBridge
                 // Step 3: QI for IDXGIResource on the D3D11 texture (AddRefs result)
                 var resGuid = IID_IDXGIResource;
                 int resHr = Marshal.QueryInterface(texture2DPtr, ref resGuid, out IntPtr dxgiResPtr);
-                if (log) DiagLog.Info($"D3DImageBridge.GetSharedHandle [first]: QI IDXGIResource hr=0x{resHr:X8}");
+                if (log) DiagLog.Info($"{prefix} D3DImageBridge.GetSharedHandle: QI IDXGIResource hr=0x{resHr:X8}");
                 if (resHr < 0) return IntPtr.Zero;
 
                 try
@@ -162,7 +166,7 @@ internal sealed class D3DImageBridge : ID3DImageBridge
 
                     // Step 4: Get the NT/legacy shared handle (no AddRef — it's a HANDLE)
                     int shareHr = dxgiRes.GetSharedHandle(out IntPtr handle);
-                    if (log) DiagLog.Info($"D3DImageBridge.GetSharedHandle [first]: GetSharedHandle hr=0x{shareHr:X8}, handle=0x{handle:X16}");
+                    if (log) DiagLog.Info($"{prefix} D3DImageBridge.GetSharedHandle: GetSharedHandle hr=0x{shareHr:X8}, handle=0x{handle:X16}");
                     return shareHr < 0 ? IntPtr.Zero : handle;
                 }
                 finally
