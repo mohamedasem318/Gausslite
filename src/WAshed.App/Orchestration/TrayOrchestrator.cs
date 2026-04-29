@@ -26,6 +26,7 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
     private bool _isBlurEnabled;
     private bool _captureStarted;
     private bool _disposed;
+    private Rect? _lastKnownBounds;
 
     // Frame-arrival diagnostics — written from background thread, use Interlocked.
     private int _frameCount;
@@ -115,6 +116,12 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
         StartupLog.Info("EnableBlur: showing OverlayWindow...");
         _overlayWindow.Show();
         StartupLog.Info("EnableBlur: OverlayWindow.Show returned");
+
+        if (_lastKnownBounds.HasValue)
+        {
+            StartupLog.Info($"EnableBlur: reapplying OverlayWindow bounds after Show to {_lastKnownBounds.Value}");
+            _overlayWindow.SetBounds(_lastKnownBounds.Value);
+        }
     }
 
     private void StopCapture()
@@ -129,6 +136,7 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
     private void OnBoundsChanged(object? sender, Rect bounds)
     {
         StartupLog.Info($"EnableBlur: setting OverlayWindow bounds to {bounds}");
+        _lastKnownBounds = bounds;
         _overlayWindow.SetBounds(bounds);
 
         // WhatsApp may not have been running when blur was enabled; try to start capture now.
