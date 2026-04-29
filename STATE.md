@@ -9,7 +9,23 @@
 
 ## Last session summary
 
-**Library swap** — H.NotifyIcon.Wpf replaced with Hardcodet.NotifyIcon.Wpf 2.0.1.
+**Diagnostic instrumentation across the full blur pipeline** — debugging session, no feature changes.
+
+Added step-by-step `StartupLog`/`DiagLog` tracing to every layer of the blur path so a top-to-bottom read of `washed-startup.log` reveals exactly where things go silent when "Enable blur" is clicked with no visible result.
+
+### Added
+- **`src/WAshed.Core/Diagnostics/DiagLog.cs`** — new internal static logger (same washed-startup.log file, same ISO-8601 timestamp format as `StartupLog`). Used by WAshed.Core and WAshed.Overlay, which cannot reference WAshed.App. `InternalsVisibleTo(WAshed.Overlay)` added to WAshed.Core.csproj.
+- **`TrayOrchestrator`** — `EnableBlur` now logs entry, WindowTracker start/started, TryCreateForWhatsApp call and result, abort if WhatsApp not found, CaptureEngine start, OverlayWindow show, SetBounds call, complete. `DisableBlur` logs entry/complete. `OnFrameArrived` logs first-frame dimensions (Interlocked flag), a per-60-frame heartbeat, and any exception (logged then re-thrown).
+- **`CaptureEngine.Start`** — logs entry, `GraphicsCaptureSession.IsSupported()` result, frame-pool creation, FrameArrived subscription, session start. First WGC frame arrival logged once via Interlocked flag.
+- **`WindowTracker`** — logs first WhatsApp window detected (HWND + bounds), first bounds change, and a one-time warning if WhatsApp is not found within 5 seconds of the poll loop starting. Refactored `SampleBounds` → `SampleBoundsWithHandle` to return the HWND alongside the rect for logging.
+- **`OverlayWindow.Show`** — logs entry (current Visibility), and HWND + IsVisible after `_window.Show()`. **`SetBounds`** logs all four coordinates. **`PresentFrame`** logs first-call source dimensions (Interlocked flag); exceptions are caught, logged via DiagLog, and swallowed so one bad frame cannot crash the app.
+- **`D3DImageBridge.UpdateD3DImage`** — first-call only (Interlocked flag) logs every step of the WinRT→DXGI→D3D9Ex bridge: surface acquisition, QI for IDirect3DDxgiInterfaceAccess (with HR), GetInterface for ID3D11Texture2D (HR), QI for IDXGIResource (HR), GetSharedHandle result (HR + handle hex value). **CRITICAL log**: if shared handle is zero logs "ABORT — render target was not created with DXGI_RESOURCE_MISC_SHARED". All exceptions caught, logged, swallowed (no re-throw).
+
+**All 39 tests still green (17 WAshed.App.Tests + 22 WAshed.Core.Tests). Build 0 errors, 0 warnings.**
+
+---
+
+**Previous session — Library swap** — H.NotifyIcon.Wpf replaced with Hardcodet.NotifyIcon.Wpf 2.0.1.
 
 Diagnostic evidence from the previous session's `washed-startup.log` proved conclusively that our code was correct: the .ico file existed on disk, `BitmapImage` loaded with real 32×32 dimensions, `TaskbarIcon` was constructed, `IconSource` was assigned, `Visibility` was forced to `Visible`, and the `System.Drawing.Icon` fallback also succeeded — yet no icon ever appeared in the system tray. The bug is inside H.NotifyIcon or its interaction with the Windows shell notification area on at least one tested machine. Swapped to Hardcodet.NotifyIcon.Wpf (the original project that H.NotifyIcon forked from), which is more mature and widely deployed.
 
