@@ -5,8 +5,6 @@ namespace WAshed.Core.WindowTracking;
 
 public sealed class WindowTracker : IWindowTracker, IDisposable
 {
-    private static readonly string[] WhatsAppProcessNames = { "WhatsApp", "WhatsAppDesktop" };
-
     private readonly IWin32Api _win32;
     private readonly TimeSpan _pollInterval;
     private CancellationTokenSource? _cts;
@@ -97,20 +95,13 @@ public sealed class WindowTracker : IWindowTracker, IDisposable
 
     private (Rect Bounds, IntPtr Hwnd)? SampleBoundsWithHandle()
     {
-        foreach (var name in WhatsAppProcessNames)
-        {
-            var handles = _win32.GetWindowHandlesForProcessName(name);
-            if (handles.Count > 0)
-            {
-                var hwnd = handles[0];
-                if (_win32.GetWindowRect(hwnd, out var rect))
-                {
-                    var dpi = _win32.GetDpiForWindow(hwnd);
-                    return (ToPhysicalRect(rect, dpi), hwnd);
-                }
-            }
-        }
-        return null;
+        var hwnd = _win32.FindWhatsAppWindowHandle();
+        if (hwnd == IntPtr.Zero) return null;
+
+        if (!_win32.GetWindowRect(hwnd, out var rect)) return null;
+
+        var dpi = _win32.GetDpiForWindow(hwnd);
+        return (ToPhysicalRect(rect, dpi), hwnd);
     }
 
     private static Rect ToPhysicalRect(RECT r, uint dpi)

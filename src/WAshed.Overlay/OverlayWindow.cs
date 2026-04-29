@@ -2,6 +2,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Text;
 using WAshed.Core.Blur;
 using WAshed.Core.Diagnostics;
 using WAshed.Overlay.Interop;
@@ -32,8 +33,9 @@ public sealed class OverlayWindow : IOverlayWindow
     private readonly ID3DImageBridge _bridge;
     private bool _disposed;
 
-    // 0 = first PresentFrame not yet logged, 1 = logged.
-    private int _firstPresentLogged;
+    private int _presentFrameCount;
+    private int _presentExceptionCount;
+    private int _visualTreeLogged;
 
     /// <summary>Creates an overlay with the default GPU bridge.</summary>
     public OverlayWindow() : this(null) { }
@@ -90,6 +92,9 @@ public sealed class OverlayWindow : IOverlayWindow
         _window.Show();
         var hwnd = new WindowInteropHelper(_window).Handle;
         DiagLog.Info($"OverlayWindow.Show: window shown, HWND=0x{hwnd:X}, IsVisible={_window.IsVisible}");
+
+        if (Interlocked.Exchange(ref _visualTreeLogged, 1) == 0)
+            DiagLog.Info($"OverlayWindow.Show: visual tree = {DescribeVisualTree()}");
     }
 
     /// <inheritdoc/>
@@ -108,24 +113,59 @@ public sealed class OverlayWindow : IOverlayWindow
     /// <inheritdoc/>
     public void PresentFrame(IBlurRenderTarget target)
     {
-        bool isFirst = Interlocked.Exchange(ref _firstPresentLogged, 1) == 0;
+        int frameNumber = Interlocked.Increment(ref _presentFrameCount);
+        bool shouldLog = frameNumber <= 5 || frameNumber % 30 == 0;
 
         // D3DImage.Lock/SetBackBuffer/Unlock must run on the UI thread.
-        _window.Dispatcher.Invoke(() =>
+        try
         {
-            try
+            _window.Dispatcher.Invoke(() =>
             {
-                if (isFirst)
-                    DiagLog.Info($"OverlayWindow.PresentFrame: first call, source dimensions={target.Width}x{target.Height}");
+                if (shouldLog)
+                {
+                    DiagLog.Info($"PresentFrame #{frameNumber}: dims={target.Width}x{target.Height}");
+                    DiagLog.Info($"PresentFrame #{frameNumber}: D3DImage.IsFrontBufferAvailable={_d3dImage.IsFrontBufferAvailable}, PixelWidth={_d3dImage.PixelWidth}, PixelHeight={_d3dImage.PixelHeight}");
+                }
 
                 _bridge.UpdateD3DImage(_d3dImage, target);
-            }
-            catch (Exception ex)
-            {
-                DiagLog.Warn("OverlayWindow.PresentFrame: exception", ex);
-                // Do NOT re-throw — one bad frame must not crash the app.
-            }
-        });
+            });
+        }
+        catch (Exception ex)
+        {
+            int exceptionCount = Interlocked.Increment(ref _presentExceptionCount);
+            DiagLog.Warn($"PresentFrame #{frameNumber}: EXCEPTION {ex.GetType().FullName}: {ex.Message} (exception #{exceptionCount})");
+            DiagLog.Warn($"PresentFrame #{frameNumber}: stack: {ex.StackTrace}");
+            // Do NOT re-throw — one bad frame must not crash the app.
+        }
+    }
+
+    private string DescribeVisualTree()
+    {
+        var sb = new StringBuilder(capacity: 500);
+        AppendElement(_window.Content as DependencyObject, sb);
+
+        if (sb.Length > 500)
+            return sb.ToString()[..497] + "...";
+
+        return sb.ToString();
+    }
+
+    private static void AppendElement(DependencyObject? element, StringBuilder sb)
+    {
+        if (element is null || sb.Length >= 500) return;
+
+        if (sb.Length > 0) sb.Append(" > ");
+        sb.Append(element.GetType().Name);
+
+        if (element is FrameworkElement frameworkElement)
+            sb.Append($"({frameworkElement.ActualWidth:0.#}x{frameworkElement.ActualHeight:0.#})");
+
+        if (element is Image image)
+            sb.Append($" Source={image.Source?.GetType().Name ?? "null"}");
+
+        int childCount = VisualTreeHelper.GetChildrenCount(element);
+        for (int i = 0; i < childCount && sb.Length < 500; i++)
+            AppendElement(VisualTreeHelper.GetChild(element, i), sb);
     }
 
     /// <inheritdoc/>
