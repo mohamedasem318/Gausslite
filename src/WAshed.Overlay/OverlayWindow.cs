@@ -2,6 +2,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Threading;
 using System.Text;
 using WAshed.Core.Blur;
 using WAshed.Core.Diagnostics;
@@ -47,13 +48,23 @@ public sealed class OverlayWindow : IOverlayWindow
         _d3dImage = new D3DImage();
         _image    = new Image
         {
-            Source  = _d3dImage,
-            Stretch = Stretch.Fill,
+            Source              = _d3dImage,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment   = VerticalAlignment.Stretch,
+            Stretch             = Stretch.Fill,
         };
+
+        var contentRoot = new Grid
+        {
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment   = VerticalAlignment.Stretch,
+        };
+        contentRoot.Children.Add(_image);
 
         _window = new Window
         {
             WindowStyle       = WindowStyle.None,
+            SizeToContent     = SizeToContent.Manual,
             AllowsTransparency = true,
             Background        = Brushes.Transparent,
             Topmost           = true,
@@ -63,7 +74,7 @@ public sealed class OverlayWindow : IOverlayWindow
             Top    = 0,
             Width  = 0,
             Height = 0,
-            Content = _image,
+            Content = contentRoot,
         };
 
         // SourceInitialized fires once, after the HWND has been created (on Show()).
@@ -95,6 +106,10 @@ public sealed class OverlayWindow : IOverlayWindow
 
         if (Interlocked.Exchange(ref _visualTreeLogged, 1) == 0)
             DiagLog.Info($"OverlayWindow.Show: visual tree = {DescribeVisualTree()}");
+
+        _window.Dispatcher.BeginInvoke(
+            () => DiagLog.Info($"OverlayWindow.Show: post-show image size = {_image.ActualWidth:0.#}x{_image.ActualHeight:0.#}"),
+            DispatcherPriority.Loaded);
     }
 
     /// <inheritdoc/>
