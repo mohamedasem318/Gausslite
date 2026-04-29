@@ -140,6 +140,9 @@ Append-only. One line per decision with date and rationale.
 - 2026-04-28: Repo private until v0.1.0 ships, then public.
 - 2026-04-28: macOS parked-but-architected. Platform-specific code lives
   behind interfaces so a future port doesn't require core rewrites.
+- 2026-04-29: OverlayWindow Image element must use Stretch=Fill and stretch
+  alignments; default Image layout produces 0x0 element which prevents D3DImage
+  from ever being painted, even though D3DImage.PixelWidth/Height are correct.
 
 ## Per-session checklist
 

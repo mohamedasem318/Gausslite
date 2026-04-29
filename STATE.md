@@ -9,17 +9,17 @@
 
 ## Last session summary
 
-**Per-frame diagnostic instrumentation added — debugging work only, no feature behavior changed.**
+**OverlayWindow layout fixed so the D3DImage host is actually paintable.**
 
-The previous blur-pipeline diagnostics were mostly one-shot, which could only prove that the first captured frame reached the app. This session replaced the first-call gates with bounded per-frame/call counters so the next smoke run can show whether frames 2 through N are lost in capture dispatch, blur processing, overlay presentation, or the D3DImage bridge.
+The blur pipeline was proven healthy end-to-end: frames arrived, the D3DImage bridge returned `hr=0`, the shared handle was stable, and `D3DImage.PixelWidth/PixelHeight` matched the captured WhatsApp frame. The visible failure was WPF layout: the visual-tree diagnostic showed `Image(0x0) Source=D3DImage`, meaning the GPU was feeding pixels into an Image element with no arranged size.
 
-### Added
-- **`TrayOrchestrator.OnFrameArrived`** now logs `FrameArrived #N: dims={w}x{h}` for frames 1-10 and every 30th frame after that. The handler now swallows and logs every exception with frame number, exception count, type/message, and stack trace so one bad frame cannot stop diagnosis.
-- **`OverlayWindow.PresentFrame`** now logs calls 1-5 and every 30th call, including source dimensions plus `D3DImage.IsFrontBufferAvailable`, `PixelWidth`, and `PixelHeight` before the bridge update.
-- **`OverlayWindow.Show`** now writes a one-time visual-tree summary confirming the content host and whether the `Image` is sourced from the `D3DImage`.
-- **`D3DImageBridge.UpdateD3DImage`** now logs every bridge step for calls 1-5 with `[bridge call #N]` prefixes, including shared handle and HRESULT values, while still logging full exception details on any failure.
+### Fixed
+- **`OverlayWindow`** now hosts the D3DImage-backed `Image` inside a stretching `Grid`.
+- The `Image` explicitly uses `HorizontalAlignment=Stretch`, `VerticalAlignment=Stretch`, and `Stretch=Fill` so it fills the overlay window exactly instead of preserving aspect ratio or collapsing to its desired size.
+- The backing `Window` explicitly uses `SizeToContent=Manual`, so the window is sized by `SetBounds` rather than by the content's measured size.
+- **`OverlayWindow.Show`** now schedules a post-layout diagnostic at `DispatcherPriority.Loaded`: `OverlayWindow.Show: post-show image size = WxH`.
 
-**Next session:** run the smoke test, keep WhatsApp captured for at least 40 seconds, then read the resulting `washed-startup.log` to identify where frames stop.
+**Next session:** run the smoke test and confirm the post-show image size matches the overlay bounds, then verify the blurred WhatsApp frame is visible.
 
 ---
 
@@ -190,6 +190,7 @@ None.
 
 (See `PLAN.md` Decisions Log for the full history.)
 
+- **OverlayWindow Image element must use `Stretch=Fill` and stretch alignments**; default Image layout produces a 0x0 element which prevents `D3DImage` from ever being painted, even though `D3DImage.PixelWidth/Height` are correct.
 - **WhatsApp detection strategy** = match by process name prefix `"WhatsApp"` (case-insensitive) OR window class `"WinUIDesktopWin32WindowClass"` + title contains `"WhatsApp"`, explicitly excluding `msedgewebview2`. Real diagnostic data showed the Store version is now a WinUI 3 app (`WhatsApp.Root` process) with a WebView2 child, not a classic UWP app. The `ApplicationFrameWindow` strategy is dead and removed.
 - **Tray library = Hardcodet.NotifyIcon.Wpf** (not H.NotifyIcon.Wpf). Rationale: H.NotifyIcon silently failed to register the icon with the Windows shell notification area on at least one tested machine despite all setup steps succeeding (file on disk, BitmapImage loaded, Icon property set, Visibility forced to Visible — all logged clean). Hardcodet's library is the more mature parent project (H.NotifyIcon is a fork of it) and is known to work reliably across Windows versions.
 - Solution pinned to x64 (Win2D requires a concrete platform; ARM64 support deferred to post-v1).
