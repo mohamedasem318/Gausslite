@@ -9,17 +9,17 @@
 
 ## Last session summary
 
-**OverlayWindow layout fixed so the D3DImage host is actually paintable.**
+**OverlayWindow sizing fixed so the D3DImage host fills the tracked window bounds.**
 
-The blur pipeline was proven healthy end-to-end: frames arrived, the D3DImage bridge returned `hr=0`, the shared handle was stable, and `D3DImage.PixelWidth/PixelHeight` matched the captured WhatsApp frame. The visible failure was WPF layout: the visual-tree diagnostic showed `Image(0x0) Source=D3DImage`, meaning the GPU was feeding pixels into an Image element with no arranged size.
+The previous layout fix made the D3DImage-backed `Image` stretch correctly, but the next diagnostic showed the parent overlay window was still only `14x14`. The sequence was `SetBounds -> Show`: `SetBounds` assigned `Left/Top/Width/Height` before the WPF HWND existed, then `Show()` realized the window at its tiny natural content size. The result was a valid blur frame rendered into a `14x14` overlay in the top-left corner instead of the tracked WhatsApp bounds.
 
 ### Fixed
-- **`OverlayWindow`** now hosts the D3DImage-backed `Image` inside a stretching `Grid`.
-- The `Image` explicitly uses `HorizontalAlignment=Stretch`, `VerticalAlignment=Stretch`, and `Stretch=Fill` so it fills the overlay window exactly instead of preserving aspect ratio or collapsing to its desired size.
-- The backing `Window` explicitly uses `SizeToContent=Manual`, so the window is sized by `SetBounds` rather than by the content's measured size.
-- **`OverlayWindow.Show`** now schedules a post-layout diagnostic at `DispatcherPriority.Loaded`: `OverlayWindow.Show: post-show image size = WxH`.
+- **`OverlayWindow`** now caches the requested bounds and reapplies them after HWND creation (`SourceInitialized`) and immediately after `Show()` returns.
+- The backing `Window` now explicitly sets `WindowStartupLocation=Manual`, `WindowState=Normal`, `WindowStyle=None`, `ResizeMode=NoResize`, and `SizeToContent=Manual` so content measurement cannot drive the overlay size.
+- **`TrayOrchestrator`** now remembers the last tracker bounds and reapplies them after `OverlayWindow.Show()`. Bounds are still sent before capture starts, but they are also sent again once the window is realized.
+- **`OverlayWindow.Show`** now logs the post-layout size at every relevant level: `Window=WxH, Grid=WxH, Image=WxH`.
 
-**Next session:** run the smoke test and confirm the post-show image size matches the overlay bounds, then verify the blurred WhatsApp frame is visible.
+**Next session:** run the smoke test and confirm `OverlayWindow.Show: post-show window size` reports the tracked WhatsApp bounds at the Window, Grid, and Image levels, then verify the blurred WhatsApp frame is visible.
 
 ---
 
@@ -191,6 +191,7 @@ None.
 (See `PLAN.md` Decisions Log for the full history.)
 
 - **OverlayWindow Image element must use `Stretch=Fill` and stretch alignments**; default Image layout produces a 0x0 element which prevents `D3DImage` from ever being painted, even though `D3DImage.PixelWidth/Height` are correct.
+- **OverlayWindow sizing must be applied via cached bounds replayed at `SourceInitialized` and after `Show()` because the HWND does not exist when the first tracker bounds can arrive, not just Width/Height property setters before Show.**
 - **WhatsApp detection strategy** = match by process name prefix `"WhatsApp"` (case-insensitive) OR window class `"WinUIDesktopWin32WindowClass"` + title contains `"WhatsApp"`, explicitly excluding `msedgewebview2`. Real diagnostic data showed the Store version is now a WinUI 3 app (`WhatsApp.Root` process) with a WebView2 child, not a classic UWP app. The `ApplicationFrameWindow` strategy is dead and removed.
 - **Tray library = Hardcodet.NotifyIcon.Wpf** (not H.NotifyIcon.Wpf). Rationale: H.NotifyIcon silently failed to register the icon with the Windows shell notification area on at least one tested machine despite all setup steps succeeding (file on disk, BitmapImage loaded, Icon property set, Visibility forced to Visible — all logged clean). Hardcodet's library is the more mature parent project (H.NotifyIcon is a fork of it) and is known to work reliably across Windows versions.
 - Solution pinned to x64 (Win2D requires a concrete platform; ARM64 support deferred to post-v1).
