@@ -3,6 +3,7 @@ using System.Windows.Controls;
 using System.Windows.Interop;
 using System.Windows.Media;
 using WAshed.Core.Blur;
+using WAshed.Core.Diagnostics;
 using WAshed.Overlay.Interop;
 
 namespace WAshed.Overlay;
@@ -30,6 +31,9 @@ public sealed class OverlayWindow : IOverlayWindow
     private readonly D3DImage      _d3dImage;
     private readonly ID3DImageBridge _bridge;
     private bool _disposed;
+
+    // 0 = first PresentFrame not yet logged, 1 = logged.
+    private int _firstPresentLogged;
 
     /// <summary>Creates an overlay with the default GPU bridge.</summary>
     public OverlayWindow() : this(null) { }
@@ -80,7 +84,13 @@ public sealed class OverlayWindow : IOverlayWindow
     }
 
     /// <inheritdoc/>
-    public void Show() => _window.Show();
+    public void Show()
+    {
+        DiagLog.Info($"OverlayWindow.Show: entry, current Visibility={_window.Visibility}");
+        _window.Show();
+        var hwnd = new WindowInteropHelper(_window).Handle;
+        DiagLog.Info($"OverlayWindow.Show: window shown, HWND=0x{hwnd:X}, IsVisible={_window.IsVisible}");
+    }
 
     /// <inheritdoc/>
     public void Hide() => _window.Hide();
@@ -88,6 +98,7 @@ public sealed class OverlayWindow : IOverlayWindow
     /// <inheritdoc/>
     public void SetBounds(Rect bounds)
     {
+        DiagLog.Info($"OverlayWindow.SetBounds: setting to Left={bounds.Left}, Top={bounds.Top}, Width={bounds.Width}, Height={bounds.Height}");
         _window.Left   = bounds.Left;
         _window.Top    = bounds.Top;
         _window.Width  = bounds.Width;
@@ -97,8 +108,24 @@ public sealed class OverlayWindow : IOverlayWindow
     /// <inheritdoc/>
     public void PresentFrame(IBlurRenderTarget target)
     {
+        bool isFirst = Interlocked.Exchange(ref _firstPresentLogged, 1) == 0;
+
         // D3DImage.Lock/SetBackBuffer/Unlock must run on the UI thread.
-        _window.Dispatcher.Invoke(() => _bridge.UpdateD3DImage(_d3dImage, target));
+        _window.Dispatcher.Invoke(() =>
+        {
+            try
+            {
+                if (isFirst)
+                    DiagLog.Info($"OverlayWindow.PresentFrame: first call, source dimensions={target.Width}x{target.Height}");
+
+                _bridge.UpdateD3DImage(_d3dImage, target);
+            }
+            catch (Exception ex)
+            {
+                DiagLog.Warn("OverlayWindow.PresentFrame: exception", ex);
+                // Do NOT re-throw — one bad frame must not crash the app.
+            }
+        });
     }
 
     /// <inheritdoc/>

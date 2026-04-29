@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Interop;
 using SharpDX.Direct3D9;
 using WAshed.Core.Blur;
+using WAshed.Core.Diagnostics;
 using Windows.Graphics.DirectX.Direct3D11;
 
 namespace WAshed.Overlay.Interop;
@@ -22,6 +23,9 @@ internal sealed class D3DImageBridge : ID3DImageBridge
     private readonly Direct3DEx _d3dEx;
     private readonly DeviceEx   _device;
     private bool _disposed;
+
+    // 0 = first UpdateD3DImage call not yet logged, 1 = logged.
+    private int _firstUpdateLogged;
 
     public D3DImageBridge()
     {
@@ -53,28 +57,57 @@ internal sealed class D3DImageBridge : ID3DImageBridge
     public void UpdateD3DImage(D3DImage d3dImage, IBlurRenderTarget blurTarget)
     {
         if (_disposed) return;
-        if (blurTarget is not INativeBlurRenderTarget nativeTarget) return;
 
-        IDirect3DSurface direct3DSurface = nativeTarget.GetDirect3DSurface();
-        IntPtr sharedHandle = GetSharedHandleFromSurface(direct3DSurface);
-        if (sharedHandle == IntPtr.Zero) return;
+        bool isFirst = Interlocked.Exchange(ref _firstUpdateLogged, 1) == 0;
 
-        using Texture texture9 = new(
-            _device,
-            width:       (int)blurTarget.Width,
-            height:      (int)blurTarget.Height,
-            levelCount:  1,
-            usage:       Usage.RenderTarget,
-            format:      Format.A8R8G8B8,
-            pool:        Pool.Default,
-            sharedHandle: ref sharedHandle);
+        try
+        {
+            if (blurTarget is not INativeBlurRenderTarget nativeTarget)
+            {
+                if (isFirst)
+                    DiagLog.Warn("D3DImageBridge.UpdateD3DImage [first]: blurTarget does not implement INativeBlurRenderTarget — returning without update");
+                return;
+            }
 
-        using Surface surface9 = texture9.GetSurfaceLevel(0);
+            if (isFirst) DiagLog.Info("D3DImageBridge.UpdateD3DImage [first]: acquiring IDirect3DSurface from render target...");
+            IDirect3DSurface direct3DSurface = nativeTarget.GetDirect3DSurface();
+            if (isFirst) DiagLog.Info("D3DImageBridge.UpdateD3DImage [first]: IDirect3DSurface acquired, beginning WinRT→DXGI unwrap...");
 
-        d3dImage.Lock();
-        d3dImage.SetBackBuffer(D3DResourceType.IDirect3DSurface9, surface9.NativePointer);
-        d3dImage.AddDirtyRect(new Int32Rect(0, 0, (int)blurTarget.Width, (int)blurTarget.Height));
-        d3dImage.Unlock();
+            IntPtr sharedHandle = GetSharedHandleFromSurface(direct3DSurface, isFirst);
+            if (isFirst) DiagLog.Info($"D3DImageBridge.UpdateD3DImage [first]: GetSharedHandle returned 0x{sharedHandle:X16}");
+
+            if (sharedHandle == IntPtr.Zero)
+            {
+                if (isFirst)
+                    DiagLog.Warn("D3DImageBridge: ABORT — shared handle is zero, render target was not created with DXGI_RESOURCE_MISC_SHARED");
+                return;
+            }
+
+            if (isFirst) DiagLog.Info("D3DImageBridge.UpdateD3DImage [first]: creating D3D9Ex texture via shared handle...");
+            using Texture texture9 = new(
+                _device,
+                width:       (int)blurTarget.Width,
+                height:      (int)blurTarget.Height,
+                levelCount:  1,
+                usage:       Usage.RenderTarget,
+                format:      Format.A8R8G8B8,
+                pool:        Pool.Default,
+                sharedHandle: ref sharedHandle);
+
+            using Surface surface9 = texture9.GetSurfaceLevel(0);
+
+            if (isFirst) DiagLog.Info("D3DImageBridge.UpdateD3DImage [first]: calling D3DImage.Lock / SetBackBuffer / Unlock...");
+            d3dImage.Lock();
+            d3dImage.SetBackBuffer(D3DResourceType.IDirect3DSurface9, surface9.NativePointer);
+            d3dImage.AddDirtyRect(new Int32Rect(0, 0, (int)blurTarget.Width, (int)blurTarget.Height));
+            d3dImage.Unlock();
+            if (isFirst) DiagLog.Info("D3DImageBridge.UpdateD3DImage [first]: SetBackBuffer completed successfully");
+        }
+        catch (Exception ex)
+        {
+            DiagLog.Warn("D3DImageBridge.UpdateD3DImage: exception during surface bridge operations", ex);
+            // Do NOT re-throw — one bad frame must not crash the app.
+        }
     }
 
     /// <summary>
@@ -82,43 +115,55 @@ internal sealed class D3DImageBridge : ID3DImageBridge
     /// underlying D3D11 texture.  Returns <see cref="IntPtr.Zero"/> on any failure
     /// (e.g. texture created without DXGI_RESOURCE_MISC_SHARED).
     /// </summary>
-    private static IntPtr GetSharedHandleFromSurface(IDirect3DSurface surface)
+    private static IntPtr GetSharedHandleFromSurface(IDirect3DSurface surface, bool log)
     {
         // CsWinRT projects all WinRT types as IWinRTObject, giving access to the
         // raw IInspectable* (which is also IUnknown*) without an extra AddRef.
-        if (surface is not WinRT.IWinRTObject winrtObj) return IntPtr.Zero;
-        if (winrtObj.NativeObject is not { } objRef) return IntPtr.Zero;
+        if (surface is not WinRT.IWinRTObject winrtObj)
+        {
+            if (log) DiagLog.Warn("D3DImageBridge.GetSharedHandle: surface is not IWinRTObject — cannot unwrap");
+            return IntPtr.Zero;
+        }
+        if (winrtObj.NativeObject is not { } objRef)
+        {
+            if (log) DiagLog.Warn("D3DImageBridge.GetSharedHandle: NativeObject is null");
+            return IntPtr.Zero;
+        }
 
         IntPtr surfacePtr = objRef.ThisPtr; // borrowed — do NOT release
+        if (log) DiagLog.Info($"D3DImageBridge.GetSharedHandle [first]: surfacePtr=0x{surfacePtr:X16}");
 
         // Step 1: QI for IDirect3DDxgiInterfaceAccess (AddRefs result)
         var dxgiAccessGuid = new Guid("A9B3D012-3DF2-4EE3-B8D1-8695F457D3C1");
-        if (Marshal.QueryInterface(surfacePtr, ref dxgiAccessGuid, out IntPtr dxgiAccessPtr) < 0)
-            return IntPtr.Zero;
+        int hr = Marshal.QueryInterface(surfacePtr, ref dxgiAccessGuid, out IntPtr dxgiAccessPtr);
+        if (log) DiagLog.Info($"D3DImageBridge.GetSharedHandle [first]: QI IDirect3DDxgiInterfaceAccess hr=0x{hr:X8}");
+        if (hr < 0) return IntPtr.Zero;
 
         try
         {
             var dxgiAccess = (IDirect3DDxgiInterfaceAccess)Marshal.GetObjectForIUnknown(dxgiAccessPtr);
 
             // Step 2: Ask for the underlying ID3D11Texture2D (returned pointer is AddRef'd)
-            if (dxgiAccess.GetInterface(in IID_ID3D11Texture2D, out IntPtr texture2DPtr) < 0)
-                return IntPtr.Zero;
+            int tex2DHr = dxgiAccess.GetInterface(in IID_ID3D11Texture2D, out IntPtr texture2DPtr);
+            if (log) DiagLog.Info($"D3DImageBridge.GetSharedHandle [first]: GetInterface ID3D11Texture2D hr=0x{tex2DHr:X8}");
+            if (tex2DHr < 0) return IntPtr.Zero;
 
             try
             {
                 // Step 3: QI for IDXGIResource on the D3D11 texture (AddRefs result)
                 var resGuid = IID_IDXGIResource;
-                if (Marshal.QueryInterface(texture2DPtr, ref resGuid, out IntPtr dxgiResPtr) < 0)
-                    return IntPtr.Zero;
+                int resHr = Marshal.QueryInterface(texture2DPtr, ref resGuid, out IntPtr dxgiResPtr);
+                if (log) DiagLog.Info($"D3DImageBridge.GetSharedHandle [first]: QI IDXGIResource hr=0x{resHr:X8}");
+                if (resHr < 0) return IntPtr.Zero;
 
                 try
                 {
                     var dxgiRes = (IDXGIResource)Marshal.GetObjectForIUnknown(dxgiResPtr);
 
                     // Step 4: Get the NT/legacy shared handle (no AddRef — it's a HANDLE)
-                    return dxgiRes.GetSharedHandle(out IntPtr handle) < 0
-                        ? IntPtr.Zero
-                        : handle;
+                    int shareHr = dxgiRes.GetSharedHandle(out IntPtr handle);
+                    if (log) DiagLog.Info($"D3DImageBridge.GetSharedHandle [first]: GetSharedHandle hr=0x{shareHr:X8}, handle=0x{handle:X16}");
+                    return shareHr < 0 ? IntPtr.Zero : handle;
                 }
                 finally
                 {
