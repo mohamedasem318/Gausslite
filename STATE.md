@@ -9,7 +9,47 @@
 
 ## Last session summary
 
-**Diagnostic instrumentation across the full blur pipeline** — debugging session, no feature changes.
+**Per-frame diagnostic instrumentation added — debugging work only, no feature behavior changed.**
+
+The previous blur-pipeline diagnostics were mostly one-shot, which could only prove that the first captured frame reached the app. This session replaced the first-call gates with bounded per-frame/call counters so the next smoke run can show whether frames 2 through N are lost in capture dispatch, blur processing, overlay presentation, or the D3DImage bridge.
+
+### Added
+- **`TrayOrchestrator.OnFrameArrived`** now logs `FrameArrived #N: dims={w}x{h}` for frames 1-10 and every 30th frame after that. The handler now swallows and logs every exception with frame number, exception count, type/message, and stack trace so one bad frame cannot stop diagnosis.
+- **`OverlayWindow.PresentFrame`** now logs calls 1-5 and every 30th call, including source dimensions plus `D3DImage.IsFrontBufferAvailable`, `PixelWidth`, and `PixelHeight` before the bridge update.
+- **`OverlayWindow.Show`** now writes a one-time visual-tree summary confirming the content host and whether the `Image` is sourced from the `D3DImage`.
+- **`D3DImageBridge.UpdateD3DImage`** now logs every bridge step for calls 1-5 with `[bridge call #N]` prefixes, including shared handle and HRESULT values, while still logging full exception details on any failure.
+
+**Next session:** run the smoke test, keep WhatsApp captured for at least 40 seconds, then read the resulting `washed-startup.log` to identify where frames stop.
+
+---
+
+**WhatsApp detection unified — real diagnostic data showed the Store version is now a WinUI 3 app, not UWP.**
+
+The previous two-strategy detection (Strategy A: process name loop; Strategy B: `ApplicationFrameWindow` class) was based on wrong assumptions. Real diagnostic data (`Get-Process` + `GetClassName` P/Invoke on the user's machine) shows the Microsoft Store WhatsApp is:
+
+- **Process:** `WhatsApp.Root`
+- **Window class:** `WinUIDesktopWin32WindowClass`
+- **Title:** `WhatsApp`
+- There is also a child `msedgewebview2` process (`Chrome_WidgetWin_1` class) that renders the chat UI via WebView2 — this must NOT be captured.
+
+The `ApplicationFrameWindow` / `ApplicationFrameHost` strategy never matched because there is no ApplicationFrameHost involvement in a WinUI 3 app.
+
+**Detection is now a single unified strategy** implemented by the predicate `Win32Api.IsWhatsAppWindow(processName, className, title)`:
+
+1. Reject if `title` is empty.
+2. Reject if `processName` contains `"msedgewebview"` (case-insensitive) — excludes WebView2 child.
+3. Match if `processName` starts with `"WhatsApp"` (case-insensitive) — covers `WhatsApp.Root`, `WhatsApp`, `WhatsAppDesktop`, etc.
+4. Match if `className == "WinUIDesktopWin32WindowClass"` AND `title` contains `"WhatsApp"` (case-insensitive) — belt-and-suspenders for future Store versions.
+
+### Changed
+- **`IWin32Api`**: Replaced `FindStoreWhatsAppWindowHandle()` with `FindWhatsAppWindowHandle()`.
+- **`Win32Api`**: Removed `FindStoreWhatsAppWindowHandle()`. Added `internal static IsWhatsAppWindow(processName, className, title)` (the single authoritative predicate, accessible to `WAshed.App` via existing `InternalsVisibleTo`). Added `FindWhatsAppWindowHandle()` using that predicate.
+- **`WindowTracker`**: `SampleBoundsWithHandle` now calls `_win32.FindWhatsAppWindowHandle()` only — no more process-name loop or two-strategy fallback. Removed `WhatsAppProcessNames` array.
+- **`CaptureItemFactory`**: Replaced `FindWin32WhatsAppWindow`/`FindStoreWhatsAppWindow` and Strategy A/B with single `FindWhatsAppWindow()`. Removed `IsWin32WhatsAppProcess`/`IsStoreWhatsAppWindow`; added `IsWhatsAppWindow` wrapper to `Win32Api.IsWhatsAppWindow`. Added per-candidate `DiagLog` tracing (up to 20 candidates, with `match` + `reason` per entry).
+- **`CaptureItemFactoryTests`**: Replaced `IsWin32WhatsAppProcess` + `IsStoreWhatsAppWindow` predicate tests with 16 `IsWhatsAppWindow` tests covering all match/reject cases. Integration test `TryCreateForWhatsApp_WhenWhatsAppNotRunning` now skips gracefully when WhatsApp IS running (detection success correctly returns true in that case).
+- **`WindowTrackerTests`**: Updated mock setup from `GetWindowHandlesForProcessName` to `FindWhatsAppWindowHandle()`.
+
+**57 tests green (35 WAshed.App.Tests + 22 WAshed.Core.Tests). Build 0 errors, 0 warnings.**
 
 Added step-by-step `StartupLog`/`DiagLog` tracing to every layer of the blur path so a top-to-bottom read of `washed-startup.log` reveals exactly where things go silent when "Enable blur" is clicked with no visible result.
 
@@ -140,7 +180,7 @@ Previous session: Shipped the two remaining pieces blocking the first end-to-end
 
 ## Next up
 
-**End-to-end smoke test resumed:** run the app, confirm tray icon appears in the system tray, then proceed with hotkey and blur tests. If the icon appears, strip diagnostics (remove `StartupLog` calls and `StartupLog.cs`). If it still fails, the problem is in the Windows shell itself (e.g., notification area overflow, icon caching) rather than the library.
+**Run the smoke test and read the resulting diagnostic log.** Keep WhatsApp captured for at least 40 seconds, then inspect `washed-startup.log` for `FrameArrived #N`, `PresentFrame #N`, `[bridge call #N]`, and `OverlayWindow.Show: visual tree = ...` lines to determine where frames 2 through N are lost.
 
 ## Blockers
 
@@ -150,6 +190,7 @@ None.
 
 (See `PLAN.md` Decisions Log for the full history.)
 
+- **WhatsApp detection strategy** = match by process name prefix `"WhatsApp"` (case-insensitive) OR window class `"WinUIDesktopWin32WindowClass"` + title contains `"WhatsApp"`, explicitly excluding `msedgewebview2`. Real diagnostic data showed the Store version is now a WinUI 3 app (`WhatsApp.Root` process) with a WebView2 child, not a classic UWP app. The `ApplicationFrameWindow` strategy is dead and removed.
 - **Tray library = Hardcodet.NotifyIcon.Wpf** (not H.NotifyIcon.Wpf). Rationale: H.NotifyIcon silently failed to register the icon with the Windows shell notification area on at least one tested machine despite all setup steps succeeding (file on disk, BitmapImage loaded, Icon property set, Visibility forced to Visible — all logged clean). Hardcodet's library is the more mature parent project (H.NotifyIcon is a fork of it) and is known to work reliably across Windows versions.
 - Solution pinned to x64 (Win2D requires a concrete platform; ARM64 support deferred to post-v1).
 - IDE = VS2022 throughout (driver dev in v1 requires it)

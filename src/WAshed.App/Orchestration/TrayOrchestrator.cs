@@ -29,7 +29,7 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
 
     // Frame-arrival diagnostics — written from background thread, use Interlocked.
     private int _frameCount;
-    private int _firstFrameLogged;   // 0 = not yet logged, 1 = logged
+    private int _frameExceptionCount;
     private int _noOutputLogged;     // 0 = not yet logged, 1 = logged
 
     public event EventHandler<bool>? BlurStateChanged;
@@ -138,19 +138,13 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
 
     private void OnFrameArrived(object? sender, ICaptureFrame frame)
     {
+        int count = Interlocked.Increment(ref _frameCount);
+
         try
         {
-            // Log first frame received.
-            if (Interlocked.Exchange(ref _firstFrameLogged, 1) == 0)
-            {
-                var sz = frame.Frame.ContentSize;
-                StartupLog.Info($"FrameArrived: first frame received, dimensions={sz.Width}x{sz.Height}");
-            }
-
-            // Log once per 60 frames (~1 s at 60 fps).
-            int count = Interlocked.Increment(ref _frameCount);
-            if (count % 60 == 0)
-                StartupLog.Info($"FrameArrived: processed {count} frames so far");
+            var sz = frame.Frame.ContentSize;
+            if (count <= 10 || count % 30 == 0)
+                StartupLog.Info($"FrameArrived #{count}: dims={sz.Width}x{sz.Height}");
 
             var blurred = _blurPipeline.BlurFrame(frame);
 
@@ -165,8 +159,9 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
         }
         catch (Exception ex)
         {
-            StartupLog.Warn("FrameArrived: unhandled exception", ex);
-            throw;
+            int exceptionCount = Interlocked.Increment(ref _frameExceptionCount);
+            StartupLog.Warn($"FrameArrived #{count}: EXCEPTION {ex.GetType().FullName}: {ex.Message} (exception #{exceptionCount})");
+            StartupLog.Warn($"FrameArrived #{count}: stack: {ex.StackTrace}");
         }
     }
 

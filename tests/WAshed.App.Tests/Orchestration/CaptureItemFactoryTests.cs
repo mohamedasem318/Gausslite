@@ -1,23 +1,30 @@
+using System.Diagnostics;
 using WAshed.App.Orchestration;
 using WAshed.Core.WindowTracking;
 
 namespace WAshed.App.Tests.Orchestration;
 
 /// <summary>
-/// Integration-style tests for <see cref="CaptureItemFactory"/> using the real Win32 API.
-/// These tests do NOT require WhatsApp to be installed.
+/// Tests for <see cref="CaptureItemFactory"/>. Integration-style tests use the real Win32 API
+/// and do not require WhatsApp to be installed. Predicate tests are pure and do not enumerate
+/// real windows.
 /// </summary>
 public sealed class CaptureItemFactoryTests
 {
+    // ── Integration tests (real Win32 API, no WhatsApp required) ─────────────
+
     /// <summary>
-    /// Validates the "no-throw on absent target" contract: when WhatsApp is not running,
-    /// <see cref="CaptureItemFactory.TryCreateForWhatsApp"/> must return <see langword="false"/>
-    /// with a null item and must not throw any exception.
-    /// This covers both the "WhatsApp not found" path and the "WGC not supported" early-exit path.
+    /// When WhatsApp is not running, TryCreateForWhatsApp must return false with a null item
+    /// and must not throw. Skipped on machines where WhatsApp is already running (detection success
+    /// would correctly return true there — validated by the predicate tests instead).
     /// </summary>
     [Fact]
     public void TryCreateForWhatsApp_WhenWhatsAppNotRunning_ReturnsFalseAndNull()
     {
+        bool whatsAppRunning = Process.GetProcesses()
+            .Any(p => p.ProcessName.StartsWith("WhatsApp", StringComparison.OrdinalIgnoreCase));
+        if (whatsAppRunning) return; // precondition not met on this machine; skip
+
         var factory = new CaptureItemFactory(new Win32Api());
 
         bool result = factory.TryCreateForWhatsApp(out var item);
@@ -27,8 +34,7 @@ public sealed class CaptureItemFactoryTests
     }
 
     /// <summary>
-    /// Calling <see cref="CaptureItemFactory.TryCreateForWhatsApp"/> multiple times must
-    /// never throw, even if the first call already returned false.
+    /// Calling TryCreateForWhatsApp multiple times must never throw, even after a false return.
     /// </summary>
     [Fact]
     public void TryCreateForWhatsApp_CalledTwice_NeverThrows()
@@ -43,4 +49,35 @@ public sealed class CaptureItemFactoryTests
 
         Assert.Null(ex);
     }
+
+    // ── IsWhatsAppWindow predicate unit tests (pure, no real window enumeration) ─
+
+    // Matches by process name prefix "WhatsApp"
+    [Theory]
+    [InlineData("WhatsApp.Root", "WinUIDesktopWin32WindowClass", "WhatsApp", true)]
+    [InlineData("WhatsApp", "Chrome_WidgetWin_1", "WhatsApp", true)]
+    [InlineData("whatsapp", "anything", "WhatsApp", true)]
+    [InlineData("WHATSAPP", "anything", "WhatsApp", true)]
+    [InlineData("WhatsAppDesktop", "Chrome_WidgetWin_1", "WhatsApp", true)]
+    [InlineData("WhatsApp.exe", "anything", "My Chat", true)]
+    // Matches by WinUI3 class + title (belt-and-suspenders for future Store builds)
+    [InlineData("SomeProcess", "WinUIDesktopWin32WindowClass", "WhatsApp", true)]
+    [InlineData("SomeProcess", "WinUIDesktopWin32WindowClass", "WhatsApp Desktop", true)]
+    // Rejects WebView2 child regardless of other fields
+    [InlineData("msedgewebview2", "Chrome_WidgetWin_1", "WhatsApp", false)]
+    [InlineData("msEdgeWebView2", "WinUIDesktopWin32WindowClass", "WhatsApp", false)]
+    // Rejects non-WhatsApp processes
+    [InlineData("notepad", "Notepad", "WhatsApp", false)]
+    [InlineData("ApplicationFrameHost", "ApplicationFrameWindow", "WhatsApp", false)]
+    [InlineData("chrome", "Chrome_WidgetWin_1", "WhatsApp", false)]
+    // Rejects empty title (window not ready / minimised to tray)
+    [InlineData("WhatsApp.Root", "WinUIDesktopWin32WindowClass", "", false)]
+    [InlineData("WhatsApp", "anything", "", false)]
+    // WinUI3 class match requires title to contain "WhatsApp"
+    [InlineData("SomeProcess", "WinUIDesktopWin32WindowClass", "Microsoft Edge", false)]
+    [InlineData("SomeProcess", "WinUIDesktopWin32WindowClass", "", false)]
+    // Class name matching is case-sensitive for the WinUI3 branch
+    [InlineData("SomeProcess", "winuidesktopwin32windowclass", "WhatsApp", false)]
+    public void IsWhatsAppWindow_ReturnsExpected(string processName, string className, string title, bool expected) =>
+        Assert.Equal(expected, CaptureItemFactory.IsWhatsAppWindow(processName, className, title));
 }

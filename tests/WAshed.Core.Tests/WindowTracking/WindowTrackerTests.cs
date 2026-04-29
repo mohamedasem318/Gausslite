@@ -13,18 +13,12 @@ public sealed class WindowTrackerTests : IDisposable
     private WindowTracker CreateTracker() =>
         new WindowTracker(_win32, TimeSpan.FromMilliseconds(10));
 
-    private void NoHandles()
-    {
-        _win32.GetWindowHandlesForProcessName(Arg.Any<string>())
-              .Returns(Array.Empty<IntPtr>());
-    }
+    private void NoHandle() =>
+        _win32.FindWhatsAppWindowHandle().Returns(IntPtr.Zero);
 
     private void SetupHandleAndRect(IntPtr hwnd, RECT rect, uint dpi = 96)
     {
-        _win32.GetWindowHandlesForProcessName("WhatsApp")
-              .Returns(new[] { hwnd });
-        _win32.GetWindowHandlesForProcessName("WhatsAppDesktop")
-              .Returns(Array.Empty<IntPtr>());
+        _win32.FindWhatsAppWindowHandle().Returns(hwnd);
         RECT dummy = default;
         _win32.GetWindowRect(Arg.Any<IntPtr>(), out dummy)
               .Returns(x => { x[1] = rect; return true; });
@@ -34,7 +28,7 @@ public sealed class WindowTrackerTests : IDisposable
     [Fact]
     public async Task CurrentBounds_IsNull_WhenNoWhatsAppProcess()
     {
-        NoHandles();
+        NoHandle();
         _tracker = CreateTracker();
         _tracker.Start();
         await Task.Delay(60);
@@ -60,8 +54,7 @@ public sealed class WindowTrackerTests : IDisposable
     public async Task BoundsChanged_Raised_WhenBoundsChange()
     {
         var hwnd = new IntPtr(42);
-        _win32.GetWindowHandlesForProcessName("WhatsApp").Returns(new[] { hwnd });
-        _win32.GetWindowHandlesForProcessName("WhatsAppDesktop").Returns(Array.Empty<IntPtr>());
+        _win32.FindWhatsAppWindowHandle().Returns(hwnd);
         _win32.GetDpiForWindow(hwnd).Returns(96u);
 
         var rect1 = new RECT { Left = 0, Top = 0, Right = 100, Bottom = 100 };
@@ -118,8 +111,7 @@ public sealed class WindowTrackerTests : IDisposable
     public async Task Stop_HaltsPolling_NoFurtherEventsFireAfterStop()
     {
         var hwnd = new IntPtr(55);
-        _win32.GetWindowHandlesForProcessName("WhatsApp").Returns(new[] { hwnd });
-        _win32.GetWindowHandlesForProcessName("WhatsAppDesktop").Returns(Array.Empty<IntPtr>());
+        _win32.FindWhatsAppWindowHandle().Returns(hwnd);
         _win32.GetDpiForWindow(hwnd).Returns(96u);
 
         RECT currentRect = new RECT { Left = 0, Top = 0, Right = 100, Bottom = 100 };
