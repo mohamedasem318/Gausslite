@@ -1,3 +1,5 @@
+using Gausslite.Core.Blur;
+
 namespace Gausslite.App.Orchestration;
 
 public interface ITrayOrchestrator : IDisposable
@@ -6,8 +8,10 @@ public interface ITrayOrchestrator : IDisposable
     event EventHandler<bool>? BlurStateChanged;
 
     bool IsBlurEnabled { get; }
+    BlurIntensityPreset CurrentIntensity { get; }
 
     void ToggleBlur();
     void EnableBlur();
     void DisableBlur();
+    void SetIntensity(BlurIntensityPreset preset);
 }
