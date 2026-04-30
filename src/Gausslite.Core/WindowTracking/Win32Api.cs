@@ -78,7 +78,7 @@ public sealed class Win32Api : IWin32Api
     IntPtr IWin32Api.GetNextWindow(IntPtr hwnd) =>
         hwnd == IntPtr.Zero ? IntPtr.Zero : NativeMethods.GetWindow(hwnd, NativeMethods.GW_HWNDNEXT);
 
-    public IntPtr FindWhatsAppWindowHandle()
+    public IntPtr FindWindowHandle(Func<string, string, string, bool> predicate)
     {
         IntPtr result = IntPtr.Zero;
         NativeMethods.EnumWindows((hwnd, _) =>
@@ -101,26 +101,12 @@ public sealed class Win32Api : IWin32Api
             var classSb = new StringBuilder(256);
             NativeMethods.GetClassName(hwnd, classSb, 256);
 
-            if (!IsWhatsAppWindow(procName, classSb.ToString(), title)) return true;
+            if (!predicate(procName, classSb.ToString(), title)) return true;
 
             result = hwnd;
             return false; // stop enumeration
         }, IntPtr.Zero);
         return result;
-    }
-
-    /// <summary>
-    /// Returns true if the given window belongs to WhatsApp Desktop (any install variant).
-    /// Rejects WebView2 child windows (msedgewebview2 process).
-    /// </summary>
-    internal static bool IsWhatsAppWindow(string processName, string className, string title)
-    {
-        if (string.IsNullOrEmpty(title)) return false;
-        if (processName.Contains("msedgewebview", StringComparison.OrdinalIgnoreCase)) return false;
-        if (processName.StartsWith("WhatsApp", StringComparison.OrdinalIgnoreCase)) return true;
-        if (className.Equals("WinUIDesktopWin32WindowClass", StringComparison.Ordinal) &&
-            title.Contains("WhatsApp", StringComparison.OrdinalIgnoreCase)) return true;
-        return false;
     }
 
     private static class NativeMethods

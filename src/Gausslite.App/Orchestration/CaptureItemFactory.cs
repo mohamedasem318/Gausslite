@@ -2,31 +2,30 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using Windows.Graphics.Capture;
+using Gausslite.Core.AppProfiles;
 using Gausslite.Core.Diagnostics;
-using Gausslite.Core.WindowTracking;
 using WinRT;
 
 namespace Gausslite.App.Orchestration;
 
 /// <summary>
-/// Locates WhatsApp Desktop's HWND and creates a <see cref="GraphicsCaptureItem"/> for it
-/// via <c>IGraphicsCaptureItemInterop</c> / <c>RoGetActivationFactory</c> P/Invoke.
-/// Supports the WinUI 3 Microsoft Store build (WhatsApp.Root process) and classic Win32
-/// installs. WebView2 child windows are explicitly excluded.
+/// Creates a <see cref="GraphicsCaptureItem"/> for the app identified by the active
+/// <see cref="IAppProfile"/> via <c>IGraphicsCaptureItemInterop</c> /
+/// <c>RoGetActivationFactory</c> P/Invoke.
 /// </summary>
 internal sealed class CaptureItemFactory : ICaptureItemFactory
 {
     private static readonly Guid IID_IGraphicsCaptureItemInterop = new("3628E81B-3CAC-4C60-B7F4-23CE0E0C3356");
     private static readonly Guid IID_IGraphicsCaptureItem = new("79C3F95B-31F7-4EC2-A464-632EF5D30760");
 
-    private readonly IWin32Api _win32Api;
+    private readonly IAppProfile _profile;
 
     // Written exactly once (first call per process lifetime) — volatile for visibility without locking.
     private static volatile bool _diagLogged;
 
-    public CaptureItemFactory(IWin32Api win32Api) => _win32Api = win32Api;
+    public CaptureItemFactory(IAppProfile profile) => _profile = profile;
 
-    public bool TryCreateForWhatsApp(out GraphicsCaptureItem? item)
+    public bool TryCreateForProfile(out GraphicsCaptureItem? item)
     {
         item = null;
 
@@ -39,7 +38,7 @@ internal sealed class CaptureItemFactory : ICaptureItemFactory
         bool logThisCall = !_diagLogged;
         if (logThisCall) _diagLogged = true;
 
-        IntPtr hwnd = FindWhatsAppWindow(logThisCall, out string foundProc, out string foundClass);
+        IntPtr hwnd = FindProfileWindow(logThisCall, out string foundProc, out string foundClass);
 
         if (hwnd == IntPtr.Zero)
             return false;
@@ -99,16 +98,15 @@ internal sealed class CaptureItemFactory : ICaptureItemFactory
 
     // ── Unified window detection ──────────────────────────────────────────────
 
-    private static IntPtr FindWhatsAppWindow(bool log, out string foundProc, out string foundClass)
+    private IntPtr FindProfileWindow(bool log, out string foundProc, out string foundClass)
     {
         IntPtr result = IntPtr.Zero;
         foundProc = "";
         foundClass = "";
         int examined = 0;
 
-        if (log) DiagLog.Info("CaptureItemFactory: enumerating top-level windows...");
+        if (log) DiagLog.Info($"CaptureItemFactory: enumerating top-level windows for {_profile.Name}...");
 
-        // Capture out-param targets for use inside the lambda (lambdas can't assign out params directly).
         string matchedProc = "";
         string matchedClass = "";
 
@@ -126,20 +124,17 @@ internal sealed class CaptureItemFactory : ICaptureItemFactory
             if (pid == 0) return true;
 
             string procName;
-            try { using var proc = Process.GetProcessById((int)pid); procName = proc.ProcessName; }
+            try { using var proc = System.Diagnostics.Process.GetProcessById((int)pid); procName = proc.ProcessName; }
             catch { return true; }
 
             var classSb = new StringBuilder(256);
             NativeMethods.GetClassName(hwnd, classSb, 256);
             string className = classSb.ToString();
 
-            bool match = IsWhatsAppWindow(procName, className, title);
+            bool match = _profile.IsAppWindow(procName, className, title);
 
             if (log && examined < 20)
-            {
-                string reason = ReasonFor(procName, className, title, match);
-                DiagLog.Info($"CaptureItemFactory: examined HWND=0x{hwnd:X}, process={procName}, class={className}, title={title}, match={match}, reason={reason}");
-            }
+                DiagLog.Info($"CaptureItemFactory: examined HWND=0x{hwnd:X}, process={procName}, class={className}, title={title}, match={match}");
             examined++;
 
             if (match)
@@ -155,36 +150,12 @@ internal sealed class CaptureItemFactory : ICaptureItemFactory
         }, IntPtr.Zero);
 
         if (log && result == IntPtr.Zero)
-            DiagLog.Info($"CaptureItemFactory: no match found among {examined} visible top-level windows");
+            DiagLog.Info($"CaptureItemFactory: no {_profile.Name} match found among {examined} visible top-level windows");
 
         foundProc = matchedProc;
         foundClass = matchedClass;
         return result;
     }
-
-    private static string ReasonFor(string processName, string className, string title, bool match)
-    {
-        if (!match)
-        {
-            if (processName.Contains("msedgewebview", StringComparison.OrdinalIgnoreCase))
-                return "WebView2 excluded";
-            return "no match";
-        }
-        if (processName.StartsWith("WhatsApp", StringComparison.OrdinalIgnoreCase))
-            return "process name starts with WhatsApp";
-        if (className.Equals("WinUIDesktopWin32WindowClass", StringComparison.Ordinal))
-            return "WinUI3 class + WhatsApp title";
-        return "matched";
-    }
-
-    // ── Pure predicate (internal for unit testing) ────────────────────────────
-
-    /// <summary>
-    /// Delegates to the single authoritative predicate in <see cref="Win32Api"/>.
-    /// Exposed <c>internal</c> so <c>CaptureItemFactoryTests</c> can call it directly.
-    /// </summary>
-    internal static bool IsWhatsAppWindow(string processName, string className, string title) =>
-        Win32Api.IsWhatsAppWindow(processName, className, title);
 
     // ── COM interface declaration ─────────────────────────────────────────────
 

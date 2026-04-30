@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Threading;
 using Gausslite.App.Diagnostics;
 using Gausslite.App.Hotkey;
+using Gausslite.Core.AppProfiles;
 using Gausslite.Core.Blur;
 using Gausslite.Core.Capture;
 using Gausslite.Core.Diagnostics;
@@ -28,6 +29,7 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
     private readonly IOverlayWindow _overlayWindow;
     private readonly IHotkeyService _hotkeyService;
     private readonly ICaptureItemFactory _captureItemFactory;
+    private readonly IAppProfile _profile;
     private readonly UiThreadDispatch _dispatchToUiThread;
     private readonly BackgroundDispatch _dispatchToBackground;
     private readonly BlurActivationStateMachine _activation = new();
@@ -59,7 +61,8 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
         IBlurPipeline blurPipeline,
         IOverlayWindow overlayWindow,
         IHotkeyService hotkeyService,
-        ICaptureItemFactory captureItemFactory)
+        ICaptureItemFactory captureItemFactory,
+        IAppProfile profile)
         : this(
             windowTracker,
             captureEngine,
@@ -67,6 +70,7 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
             overlayWindow,
             hotkeyService,
             captureItemFactory,
+            profile,
             DispatchToWpfUiThread,
             DispatchToThreadPool)
     {
@@ -79,6 +83,7 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
         IOverlayWindow overlayWindow,
         IHotkeyService hotkeyService,
         ICaptureItemFactory captureItemFactory,
+        IAppProfile profile,
         UiThreadDispatch dispatchToUiThread,
         BackgroundDispatch? dispatchToBackground = null)
     {
@@ -88,6 +93,7 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
         _overlayWindow = overlayWindow;
         _hotkeyService = hotkeyService;
         _captureItemFactory = captureItemFactory;
+        _profile = profile;
         _dispatchToUiThread = dispatchToUiThread;
         _dispatchToBackground = dispatchToBackground ?? DispatchToThreadPool;
 
@@ -120,7 +126,7 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
         if (_windowTracker.IsWindowPresent)
             BeginEagerSetup("EnableBlur");
         else
-            StartupLog.Info("EnableBlur: armed - waiting for WhatsApp HWND before eager capture setup");
+            StartupLog.Info($"EnableBlur: armed - waiting for {_profile.Name} HWND before eager capture setup");
 
         BlurStateChanged?.Invoke(this, true);
         StartupLog.Info($"EnableBlur: complete, state={_activation.State}");
@@ -157,15 +163,15 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
         {
             GraphicsCaptureItem? item = null;
             var factoryStartedAt = Stopwatch.GetTimestamp();
-            StartupLog.Info($"{source}: calling CaptureItemFactory.TryCreateForWhatsApp on background thread");
+            StartupLog.Info($"{source}: calling CaptureItemFactory.TryCreateForProfile on background thread");
             bool success;
             try
             {
-                success = _captureItemFactory.TryCreateForWhatsApp(out item);
+                success = _captureItemFactory.TryCreateForProfile(out item);
             }
             catch (Exception ex)
             {
-                StartupLog.Warn($"{source}: TryCreateForWhatsApp failed during eager setup", ex);
+                StartupLog.Warn($"{source}: TryCreateForProfile failed during eager setup", ex);
                 _dispatchToUiThread($"{source}.EagerSetupFactoryException", () =>
                 {
                     if (generation == _setupGeneration)
@@ -177,7 +183,7 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
             }
 
             var factoryElapsed = ElapsedMilliseconds(factoryStartedAt);
-            StartupLog.Info($"{source}: TryCreateForWhatsApp returned success={success}, itemNull={item is null}, elapsed={factoryElapsed:F3} ms");
+            StartupLog.Info($"{source}: TryCreateForProfile returned success={success}, itemNull={item is null}, elapsed={factoryElapsed:F3} ms");
 
             if (!success)
             {
@@ -395,7 +401,7 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
 
             if (_windowTracker.IsOccluded)
             {
-                DiagLog.Info("OnMinimizedChanged: restore arrived while WhatsApp is still occluded; keeping overlay hidden");
+                DiagLog.Info($"OnMinimizedChanged: restore arrived while {_profile.Name} is still occluded; keeping overlay hidden");
                 TransitionToArmed("OnMinimizedChanged");
                 return;
             }

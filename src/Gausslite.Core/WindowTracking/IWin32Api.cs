@@ -13,8 +13,8 @@ public interface IWin32Api
     IntPtr GetNextWindow(IntPtr hwnd);
 
     /// <summary>
-    /// Finds the first visible top-level WhatsApp window using the unified detection strategy.
-    /// Returns <see cref="IntPtr.Zero"/> if not found.
+    /// Enumerates visible top-level windows and returns the first HWND for which
+    /// <paramref name="predicate"/> returns true, or <see cref="IntPtr.Zero"/> if none match.
     /// </summary>
-    IntPtr FindWhatsAppWindowHandle();
+    IntPtr FindWindowHandle(Func<string, string, string, bool> predicate);
 }
