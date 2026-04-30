@@ -1,4 +1,5 @@
 using Windows.Graphics.Capture;
+using Windows.Graphics;
 
 namespace WAshed.Core.Capture;
 
@@ -10,4 +11,7 @@ namespace WAshed.Core.Capture;
 public interface ICaptureFrame : IDisposable
 {
     Direct3D11CaptureFrame Frame { get; }
+
+    /// <summary>The content size reported by Windows Graphics Capture for this frame.</summary>
+    SizeInt32 ContentSize { get; }
 }

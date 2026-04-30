@@ -28,6 +28,14 @@ WhatsApp chat regions — automatically, no hotkey required.
 - Toggle between blurring chat list, open conversation, or both
 - Manual hotkey toggle as fallback
 
+## Known limitations
+
+- When WhatsApp is partially behind another window, the overlay hides rather
+  than clipping to the visible region. Region-aware blur in v0.2.0 will
+  address this.
+- Brief content visibility (~50-100ms) during minimize animation. The IDD-based
+  v1 release fixes this completely.
+
 ## Roadmap
 
 - [ ] **v0.1.0** — Overlay-based blur for WhatsApp Desktop

@@ -50,7 +50,7 @@ public sealed class Win2DBlurInterop : IBlurInterop
     /// <inheritdoc/>
     public (float Width, float Height) GetFrameSize(ICaptureFrame frame)
     {
-        var size = frame.Frame.ContentSize;
+        var size = frame.ContentSize;
         return ((float)size.Width, (float)size.Height);
     }
 }

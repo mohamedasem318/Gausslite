@@ -12,6 +12,12 @@ public sealed class Win32Api : IWin32Api
     [DllImport("user32.dll")]
     private static extern uint GetDpiForWindow(IntPtr hWnd);
 
+    [DllImport("user32.dll")]
+    private static extern bool IsIconic(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsZoomed(IntPtr hWnd);
+
     public IReadOnlyList<IntPtr> GetWindowHandlesForProcessName(string processName)
     {
         var handles = new List<IntPtr>();
@@ -32,6 +38,45 @@ public sealed class Win32Api : IWin32Api
 
     uint IWin32Api.GetDpiForWindow(IntPtr hwnd) =>
         GetDpiForWindow(hwnd);
+
+    bool IWin32Api.IsIconic(IntPtr hwnd) =>
+        IsIconic(hwnd);
+
+    bool IWin32Api.IsZoomed(IntPtr hwnd) =>
+        IsZoomed(hwnd);
+
+    bool IWin32Api.TryGetMonitorWorkArea(IntPtr hwnd, out RECT workArea)
+    {
+        var monitor = NativeMethods.MonitorFromWindow(hwnd, NativeMethods.MONITOR_DEFAULTTONEAREST);
+        if (monitor == IntPtr.Zero)
+        {
+            workArea = default;
+            return false;
+        }
+
+        var info = new NativeMethods.MONITORINFO
+        {
+            cbSize = Marshal.SizeOf<NativeMethods.MONITORINFO>()
+        };
+
+        if (!NativeMethods.GetMonitorInfo(monitor, ref info))
+        {
+            workArea = default;
+            return false;
+        }
+
+        workArea = info.rcWork;
+        return true;
+    }
+
+    IntPtr IWin32Api.WindowFromPoint(POINT point) =>
+        NativeMethods.WindowFromPoint(point);
+
+    IntPtr IWin32Api.GetRootWindow(IntPtr hwnd) =>
+        hwnd == IntPtr.Zero ? IntPtr.Zero : NativeMethods.GetAncestor(hwnd, NativeMethods.GA_ROOT);
+
+    IntPtr IWin32Api.GetNextWindow(IntPtr hwnd) =>
+        hwnd == IntPtr.Zero ? IntPtr.Zero : NativeMethods.GetWindow(hwnd, NativeMethods.GW_HWNDNEXT);
 
     public IntPtr FindWhatsAppWindowHandle()
     {
@@ -99,5 +144,35 @@ public sealed class Win32Api : IWin32Api
 
         [DllImport("user32.dll")]
         public static extern bool IsWindowVisible(IntPtr hWnd);
+
+        public const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr WindowFromPoint(POINT point);
+
+        public const uint GA_ROOT = 2;
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetAncestor(IntPtr hwnd, uint gaFlags);
+
+        public const uint GW_HWNDNEXT = 2;
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetWindow(IntPtr hwnd, uint uCmd);
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct MONITORINFO
+        {
+            public int cbSize;
+            public RECT rcMonitor;
+            public RECT rcWork;
+            public uint dwFlags;
+        }
     }
 }

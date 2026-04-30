@@ -27,12 +27,27 @@ public sealed class TrayOrchestratorTests
         _hotkeyService,
         _captureItemFactory);
 
+    private TrayOrchestrator CreateSutWithInlineDispatch() => new(
+        _windowTracker,
+        _captureEngine,
+        _blurPipeline,
+        _overlayWindow,
+        _hotkeyService,
+        _captureItemFactory,
+        (_, action, _) => action(),
+        (_, action) => action());
+
     // Configures the factory to report WhatsApp as found.
     // item is null! because GraphicsCaptureItem cannot be constructed in unit tests;
     // TrayOrchestrator passes it straight through to the mocked ICaptureEngine which
     // accepts any value (Arg.Any<GraphicsCaptureItem>() matches null).
     private void SetupWhatsAppFound()
     {
+        _windowTracker.IsWindowPresent.Returns(true);
+        _windowTracker.IsMinimized.Returns(false);
+        _windowTracker.IsOccluded.Returns(false);
+        _windowTracker.CurrentBounds.Returns(new Rect(0, 0, 800, 600));
+
         GraphicsCaptureItem? dummy = null;
         _captureItemFactory
             .TryCreateForWhatsApp(out dummy)
@@ -41,26 +56,44 @@ public sealed class TrayOrchestratorTests
 
     private void SetupWhatsAppNotRunning()
     {
+        _windowTracker.IsWindowPresent.Returns(false);
+        _windowTracker.IsMinimized.Returns(false);
+        _windowTracker.IsOccluded.Returns(false);
+        _windowTracker.CurrentBounds.Returns((Rect?)null);
+
         GraphicsCaptureItem? dummy = null;
         _captureItemFactory
             .TryCreateForWhatsApp(out dummy)
             .Returns(x => { x[0] = null!; return false; });
     }
 
+    private void SetupWhatsAppMinimized()
+    {
+        _windowTracker.IsWindowPresent.Returns(true);
+        _windowTracker.IsMinimized.Returns(true);
+        _windowTracker.IsOccluded.Returns(false);
+        _windowTracker.CurrentBounds.Returns((Rect?)null);
+
+        GraphicsCaptureItem? dummy = null;
+        _captureItemFactory
+            .TryCreateForWhatsApp(out dummy)
+            .Returns(x => { x[0] = null!; return true; });
+    }
+
     [Fact]
-    public void Enable_StartsTrackerThenCaptureThenShowsOverlay()
+    public void Enable_StartsTrackerThenCreatesOffscreenOverlayThenCapture()
     {
         SetupWhatsAppFound();
-        using var sut = CreateSut();
+        using var sut = CreateSutWithInlineDispatch();
 
         sut.EnableBlur();
 
-        Received.InOrder(() =>
-        {
-            _windowTracker.Start();
-            _captureEngine.Start(Arg.Any<GraphicsCaptureItem>());
-            _overlayWindow.Show();
-        });
+        _windowTracker.Received(1).Start();
+        _overlayWindow.Received(1).ShowPlaceholder();
+        _overlayWindow.Received(1).ShowOffscreen(new Rect(0, 0, 800, 600));
+        _captureEngine.Received(1).Start(Arg.Any<GraphicsCaptureItem>());
+        _overlayWindow.Received(1).MoveToBounds(new Rect(0, 0, 800, 600));
+        Assert.Equal(BlurActivationState.Active, sut.ActivationState);
     }
 
     [Fact]
@@ -103,17 +136,14 @@ public sealed class TrayOrchestratorTests
     public void Disable_StopsCaptureHidesOverlayThenStopsTracker()
     {
         SetupWhatsAppFound();
-        using var sut = CreateSut();
+        using var sut = CreateSutWithInlineDispatch();
         sut.EnableBlur();
 
         sut.DisableBlur();
 
-        Received.InOrder(() =>
-        {
-            _captureEngine.Stop();
-            _overlayWindow.Hide();
-            _windowTracker.Stop();
-        });
+        _captureEngine.Received(1).Stop();
+        _overlayWindow.Received(1).MoveOffscreen();
+        _windowTracker.Received(1).Stop();
     }
 
     [Fact]
@@ -167,7 +197,7 @@ public sealed class TrayOrchestratorTests
     }
 
     [Fact]
-    public void BoundsChanged_PropagatesSetBoundsToOverlay()
+    public void BoundsChanged_WhenApplicationCurrentIsNull_DoesNotTouchOverlay()
     {
         SetupWhatsAppNotRunning();
         using var sut = CreateSut();
@@ -176,11 +206,11 @@ public sealed class TrayOrchestratorTests
 
         _windowTracker.BoundsChanged += Raise.Event<EventHandler<Rect>>(this, bounds);
 
-        _overlayWindow.Received().SetBounds(bounds);
+        _overlayWindow.DidNotReceive().MoveToBounds(Arg.Any<Rect>());
     }
 
     [Fact]
-    public void BoundsChanged_WhenWhatsAppLaterAppears_StartsCapture()
+    public void BoundsChanged_WhenApplicationCurrentIsNull_DoesNotStartDeferredCapture()
     {
         SetupWhatsAppNotRunning();
         using var sut = CreateSut();
@@ -190,11 +220,104 @@ public sealed class TrayOrchestratorTests
         SetupWhatsAppFound();
         _windowTracker.BoundsChanged += Raise.Event<EventHandler<Rect>>(this, new Rect(0, 0, 800, 600));
 
-        _captureEngine.Received(1).Start(Arg.Any<GraphicsCaptureItem>());
+        _captureEngine.DidNotReceive().Start(Arg.Any<GraphicsCaptureItem>());
     }
 
     [Fact]
-    public void BoundsChanged_WhenWhatsAppLaterAppears_ReappliesBoundsAfterShow()
+    public void Enable_WhenWhatsAppMinimized_EagerCreatesOffscreenOverlayAndArms()
+    {
+        SetupWhatsAppMinimized();
+        using var sut = CreateSutWithInlineDispatch();
+
+        sut.EnableBlur();
+
+        Assert.True(sut.IsBlurEnabled);
+        Assert.Equal(BlurActivationState.Armed, sut.ActivationState);
+        _windowTracker.Received(1).Start();
+        GraphicsCaptureItem? ignored;
+        _captureItemFactory.Received(1).TryCreateForWhatsApp(out ignored);
+        _captureEngine.Received(1).Start(Arg.Any<GraphicsCaptureItem>());
+        _overlayWindow.Received(1).ShowOffscreen(Arg.Any<Rect>());
+        _overlayWindow.DidNotReceive().MoveToBounds(Arg.Any<Rect>());
+    }
+
+    [Fact]
+    public void ReMinimize_MovesOverlayOffscreenAndKeepsCaptureAlive()
+    {
+        SetupWhatsAppFound();
+        using var sut = CreateSutWithInlineDispatch();
+        sut.EnableBlur();
+        _captureEngine.ClearReceivedCalls();
+        _overlayWindow.ClearReceivedCalls();
+
+        _windowTracker.MinimizedChanged += Raise.Event<EventHandler<bool>>(this, true);
+
+        _overlayWindow.Received(1).MoveOffscreen();
+        _captureEngine.DidNotReceive().Stop();
+        Assert.Equal(BlurActivationState.Armed, sut.ActivationState);
+    }
+
+    [Fact]
+    public void WindowClosesDuringActive_TearsDownCaptureAndReturnsToArmed()
+    {
+        SetupWhatsAppFound();
+        using var sut = CreateSutWithInlineDispatch();
+        sut.EnableBlur();
+        _captureEngine.ClearReceivedCalls();
+        _overlayWindow.ClearReceivedCalls();
+
+        _windowTracker.IsWindowPresent.Returns(false);
+        _windowTracker.WindowPresenceChanged += Raise.Event<EventHandler<bool>>(this, false);
+
+        _captureEngine.Received(1).Stop();
+        _overlayWindow.Received(1).MoveOffscreen();
+        _overlayWindow.Received(1).Destroy();
+        Assert.Equal(BlurActivationState.Armed, sut.ActivationState);
+    }
+
+    [Fact]
+    public void WindowReopensAfterClose_RunsEagerSetupAgainAndStaysArmedWhenMinimized()
+    {
+        SetupWhatsAppFound();
+        using var sut = CreateSutWithInlineDispatch();
+        sut.EnableBlur();
+
+        _windowTracker.IsWindowPresent.Returns(false);
+        _windowTracker.WindowPresenceChanged += Raise.Event<EventHandler<bool>>(this, false);
+        _captureItemFactory.ClearReceivedCalls();
+        _captureEngine.ClearReceivedCalls();
+        _overlayWindow.ClearReceivedCalls();
+
+        SetupWhatsAppMinimized();
+        _windowTracker.WindowPresenceChanged += Raise.Event<EventHandler<bool>>(this, true);
+
+        GraphicsCaptureItem? ignored;
+        _captureItemFactory.Received(1).TryCreateForWhatsApp(out ignored);
+        _captureEngine.Received(1).Start(Arg.Any<GraphicsCaptureItem>());
+        _overlayWindow.Received(1).ShowOffscreen(Arg.Any<Rect>());
+        _overlayWindow.DidNotReceive().MoveToBounds(Arg.Any<Rect>());
+        Assert.Equal(BlurActivationState.Armed, sut.ActivationState);
+    }
+
+    [Fact]
+    public void Disable_FromActive_StopsCaptureHidesOverlayAndReturnsIdle()
+    {
+        SetupWhatsAppFound();
+        using var sut = CreateSutWithInlineDispatch();
+        sut.EnableBlur();
+        _captureEngine.ClearReceivedCalls();
+        _overlayWindow.ClearReceivedCalls();
+
+        sut.DisableBlur();
+
+        _captureEngine.Received(1).Stop();
+        _overlayWindow.Received(1).MoveOffscreen();
+        _overlayWindow.Received(1).Destroy();
+        Assert.Equal(BlurActivationState.Idle, sut.ActivationState);
+    }
+
+    [Fact]
+    public void BoundsChanged_WhenApplicationCurrentIsNull_DoesNotReapplyBoundsAfterShow()
     {
         SetupWhatsAppNotRunning();
         using var sut = CreateSut();
@@ -205,13 +328,57 @@ public sealed class TrayOrchestratorTests
         SetupWhatsAppFound();
         _windowTracker.BoundsChanged += Raise.Event<EventHandler<Rect>>(this, bounds);
 
-        Received.InOrder(() =>
-        {
-            _overlayWindow.SetBounds(bounds);
-            _captureEngine.Start(Arg.Any<GraphicsCaptureItem>());
-            _overlayWindow.Show();
-            _overlayWindow.SetBounds(bounds);
-        });
+        _overlayWindow.DidNotReceive().MoveToBounds(bounds);
+        _overlayWindow.DidNotReceive().ShowOffscreen(Arg.Any<Rect>());
+    }
+
+    [Fact]
+    public void MinimizedChanged_WhenApplicationCurrentIsNull_DoesNotHideOverlay()
+    {
+        SetupWhatsAppFound();
+        using var sut = CreateSut();
+        sut.EnableBlur();
+        _overlayWindow.ClearReceivedCalls();
+
+        _windowTracker.MinimizedChanged += Raise.Event<EventHandler<bool>>(this, true);
+
+        _overlayWindow.DidNotReceive().MoveOffscreen();
+    }
+
+    [Fact]
+    public void MinimizedChanged_WhenApplicationCurrentIsNull_DoesNotShowOverlay()
+    {
+        SetupWhatsAppFound();
+        using var sut = CreateSut();
+        sut.EnableBlur();
+        _overlayWindow.ClearReceivedCalls();
+
+        _windowTracker.MinimizedChanged += Raise.Event<EventHandler<bool>>(this, false);
+
+        _overlayWindow.DidNotReceive().MoveToBounds(Arg.Any<Rect>());
+        _overlayWindow.DidNotReceive().ShowOffscreen(Arg.Any<Rect>());
+    }
+
+    [Fact]
+    public void MinimizedChangedFalse_WhenArmed_MovesOverlayToBoundsWithoutNewCaptureItem()
+    {
+        SetupWhatsAppMinimized();
+        using var sut = CreateSutWithInlineDispatch();
+        sut.EnableBlur();
+        _captureItemFactory.ClearReceivedCalls();
+        _captureEngine.ClearReceivedCalls();
+        _overlayWindow.ClearReceivedCalls();
+
+        SetupWhatsAppFound();
+        _windowTracker.IsOccluded.Returns(false);
+
+        _windowTracker.MinimizedChanged += Raise.Event<EventHandler<bool>>(this, false);
+
+        GraphicsCaptureItem? ignored;
+        _captureItemFactory.DidNotReceive().TryCreateForWhatsApp(out ignored);
+        _captureEngine.DidNotReceive().Start(Arg.Any<GraphicsCaptureItem>());
+        _overlayWindow.Received(1).MoveToBounds(new Rect(0, 0, 800, 600));
+        Assert.Equal(BlurActivationState.Active, sut.ActivationState);
     }
 
     [Fact]
@@ -243,7 +410,7 @@ public sealed class TrayOrchestratorTests
     public void Dispose_WhenEnabled_StopsEverything()
     {
         SetupWhatsAppFound();
-        var sut = CreateSut();
+        var sut = CreateSutWithInlineDispatch();
         sut.EnableBlur();
 
         sut.Dispose();

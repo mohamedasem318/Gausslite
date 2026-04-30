@@ -1,5 +1,8 @@
 using Windows.Foundation;
 using Windows.Graphics.Capture;
+using Windows.Graphics;
+using Windows.Graphics.DirectX;
+using Windows.Graphics.DirectX.Direct3D11;
 
 namespace WAshed.Core.Capture;
 
@@ -41,6 +44,15 @@ internal sealed class WinRTCaptureFramePool : ICaptureFramePool
     {
         var frame = _pool.TryGetNextFrame();
         return frame is null ? null : new WinRTCaptureFrame(frame);
+    }
+
+    public void Recreate(IDirect3DDevice device, SizeInt32 size)
+    {
+        _pool.Recreate(
+            device,
+            DirectXPixelFormat.B8G8R8A8UIntNormalized,
+            numberOfBuffers: 2,
+            size);
     }
 
     public void Dispose() => _pool.Dispose();
