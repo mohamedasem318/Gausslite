@@ -1,8 +1,11 @@
+using System.Diagnostics;
 using System.Windows;
+using System.Windows.Threading;
 using WAshed.App.Diagnostics;
 using WAshed.App.Hotkey;
 using WAshed.Core.Blur;
 using WAshed.Core.Capture;
+using WAshed.Core.Diagnostics;
 using WAshed.Core.WindowTracking;
 using WAshed.Overlay;
 using Windows.Graphics.Capture;
@@ -16,26 +19,39 @@ namespace WAshed.App.Orchestration;
 /// </summary>
 public sealed class TrayOrchestrator : ITrayOrchestrator
 {
+    internal delegate void UiThreadDispatch(string source, Action action, DispatcherPriority priority = DispatcherPriority.Normal);
+    internal delegate void BackgroundDispatch(string source, Action action);
+
     private readonly IWindowTracker _windowTracker;
     private readonly ICaptureEngine _captureEngine;
     private readonly IBlurPipeline _blurPipeline;
     private readonly IOverlayWindow _overlayWindow;
     private readonly IHotkeyService _hotkeyService;
     private readonly ICaptureItemFactory _captureItemFactory;
+    private readonly UiThreadDispatch _dispatchToUiThread;
+    private readonly BackgroundDispatch _dispatchToBackground;
+    private readonly BlurActivationStateMachine _activation = new();
 
-    private bool _isBlurEnabled;
     private bool _captureStarted;
+    private bool _setupReady;
+    private bool _setupInProgress;
+    private bool _overlayVisible;
     private bool _disposed;
     private Rect? _lastKnownBounds;
+    private int _setupGeneration;
 
     // Frame-arrival diagnostics — written from background thread, use Interlocked.
     private int _frameCount;
     private int _frameExceptionCount;
     private int _noOutputLogged;     // 0 = not yet logged, 1 = logged
+    private long _lastBlurredFrameTimestamp;
+    private int _lastBlurredFrameWidth;
+    private int _lastBlurredFrameHeight;
 
     public event EventHandler<bool>? BlurStateChanged;
 
-    public bool IsBlurEnabled => _isBlurEnabled;
+    public bool IsBlurEnabled => _activation.State != BlurActivationState.Idle;
+    internal BlurActivationState ActivationState => _activation.State;
 
     public TrayOrchestrator(
         IWindowTracker windowTracker,
@@ -44,6 +60,27 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
         IOverlayWindow overlayWindow,
         IHotkeyService hotkeyService,
         ICaptureItemFactory captureItemFactory)
+        : this(
+            windowTracker,
+            captureEngine,
+            blurPipeline,
+            overlayWindow,
+            hotkeyService,
+            captureItemFactory,
+            DispatchToWpfUiThread,
+            DispatchToThreadPool)
+    {
+    }
+
+    internal TrayOrchestrator(
+        IWindowTracker windowTracker,
+        ICaptureEngine captureEngine,
+        IBlurPipeline blurPipeline,
+        IOverlayWindow overlayWindow,
+        IHotkeyService hotkeyService,
+        ICaptureItemFactory captureItemFactory,
+        UiThreadDispatch dispatchToUiThread,
+        BackgroundDispatch? dispatchToBackground = null)
     {
         _windowTracker = windowTracker;
         _captureEngine = captureEngine;
@@ -51,98 +88,475 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
         _overlayWindow = overlayWindow;
         _hotkeyService = hotkeyService;
         _captureItemFactory = captureItemFactory;
+        _dispatchToUiThread = dispatchToUiThread;
+        _dispatchToBackground = dispatchToBackground ?? DispatchToThreadPool;
 
         _hotkeyService.HotkeyPressed += OnHotkeyPressed;
     }
 
     public void ToggleBlur()
     {
-        if (_isBlurEnabled) DisableBlur();
+        if (IsBlurEnabled) DisableBlur();
         else EnableBlur();
     }
 
     public void EnableBlur()
     {
-        if (_isBlurEnabled) return;
+        if (IsBlurEnabled) return;
         StartupLog.Info("EnableBlur: entry");
-        _isBlurEnabled = true;
 
         StartupLog.Info("EnableBlur: starting WindowTracker...");
         _windowTracker.BoundsChanged += OnBoundsChanged;
+        _windowTracker.MinimizedChanged += OnMinimizedChanged;
+        _windowTracker.OcclusionChanged += OnOcclusionChanged;
+        _windowTracker.WindowPresenceChanged += OnWindowPresenceChanged;
         _windowTracker.Start();
         StartupLog.Info("EnableBlur: WindowTracker started");
 
-        StartupLog.Info("EnableBlur: calling CaptureItemFactory.TryCreateForWhatsApp...");
-        var success = _captureItemFactory.TryCreateForWhatsApp(out var item);
-        StartupLog.Info($"EnableBlur: TryCreateForWhatsApp returned success={success}, itemNull={item is null}");
+        TransitionToArmed("EnableBlur");
+        if (_windowTracker.CurrentBounds.HasValue)
+            _lastKnownBounds = _windowTracker.CurrentBounds.Value;
 
-        if (!success)
-        {
-            StartupLog.Info("EnableBlur: ABORTING — no capture item available (WhatsApp not running yet; will retry via BoundsChanged)");
-        }
+        if (_windowTracker.IsWindowPresent)
+            BeginEagerSetup("EnableBlur");
         else
-        {
-            StartCapture(item!);
-        }
+            StartupLog.Info("EnableBlur: armed - waiting for WhatsApp HWND before eager capture setup");
 
         BlurStateChanged?.Invoke(this, true);
-        StartupLog.Info("EnableBlur: complete");
+        StartupLog.Info($"EnableBlur: complete, state={_activation.State}");
     }
 
     public void DisableBlur()
     {
         StartupLog.Info("DisableBlur: entry");
-        if (!_isBlurEnabled) return;
-        _isBlurEnabled = false;
+        if (!IsBlurEnabled) return;
 
-        StopCapture();
+        TearDownCaptureAndOverlay("DisableBlur");
+        TransitionToIdle("DisableBlur");
         _windowTracker.BoundsChanged -= OnBoundsChanged;
+        _windowTracker.MinimizedChanged -= OnMinimizedChanged;
+        _windowTracker.OcclusionChanged -= OnOcclusionChanged;
+        _windowTracker.WindowPresenceChanged -= OnWindowPresenceChanged;
         _windowTracker.Stop();
 
         BlurStateChanged?.Invoke(this, false);
-        StartupLog.Info("DisableBlur: complete");
+        StartupLog.Info($"DisableBlur: complete, state={_activation.State}");
     }
 
-    private void StartCapture(GraphicsCaptureItem item)
+    private void BeginEagerSetup(string source)
     {
-        if (_captureStarted) return;
-        _captureStarted = true;
+        if (!IsBlurEnabled || !_windowTracker.IsWindowPresent || _setupReady || _setupInProgress)
+            return;
 
-        StartupLog.Info("EnableBlur: starting CaptureEngine on captured item...");
-        _captureEngine.FrameArrived += OnFrameArrived;
-        _captureEngine.Start(item);
-        StartupLog.Info("EnableBlur: CaptureEngine.Start returned");
+        _setupInProgress = true;
+        var generation = _setupGeneration;
+        var setupStartedAt = Stopwatch.GetTimestamp();
+        StartupLog.Info($"{source}: eager setup begin (generation={generation})");
 
-        StartupLog.Info("EnableBlur: showing OverlayWindow...");
-        _overlayWindow.Show();
-        StartupLog.Info("EnableBlur: OverlayWindow.Show returned");
-
-        if (_lastKnownBounds.HasValue)
+        _dispatchToBackground($"{source}.EagerSetup", () =>
         {
-            StartupLog.Info($"EnableBlur: reapplying OverlayWindow bounds after Show to {_lastKnownBounds.Value}");
-            _overlayWindow.SetBounds(_lastKnownBounds.Value);
-        }
+            GraphicsCaptureItem? item = null;
+            var factoryStartedAt = Stopwatch.GetTimestamp();
+            StartupLog.Info($"{source}: calling CaptureItemFactory.TryCreateForWhatsApp on background thread");
+            bool success;
+            try
+            {
+                success = _captureItemFactory.TryCreateForWhatsApp(out item);
+            }
+            catch (Exception ex)
+            {
+                StartupLog.Warn($"{source}: TryCreateForWhatsApp failed during eager setup", ex);
+                _dispatchToUiThread($"{source}.EagerSetupFactoryException", () =>
+                {
+                    if (generation == _setupGeneration)
+                        _setupInProgress = false;
+
+                    StartupLog.Info($"{source}: eager setup end after factory exception, elapsed={ElapsedMilliseconds(setupStartedAt):F3} ms");
+                });
+                return;
+            }
+
+            var factoryElapsed = ElapsedMilliseconds(factoryStartedAt);
+            StartupLog.Info($"{source}: TryCreateForWhatsApp returned success={success}, itemNull={item is null}, elapsed={factoryElapsed:F3} ms");
+
+            if (!success)
+            {
+                _dispatchToUiThread($"{source}.EagerSetupFailed", () =>
+                {
+                    if (generation == _setupGeneration)
+                        _setupInProgress = false;
+
+                    StartupLog.Info($"{source}: eager setup end without capture item, elapsed={ElapsedMilliseconds(setupStartedAt):F3} ms");
+                });
+                return;
+            }
+
+            _dispatchToUiThread($"{source}.ShowOffscreenOverlay", () =>
+            {
+                if (!IsBlurEnabled || generation != _setupGeneration || !_windowTracker.IsWindowPresent)
+                {
+                    _setupInProgress = false;
+                    StartupLog.Info($"{source}: eager setup abandoned before offscreen overlay creation");
+                    return;
+                }
+
+                ShowOverlayOffscreenForSetup(source);
+                _captureEngine.FrameArrived += OnFrameArrived;
+                _captureStarted = true;
+
+                _dispatchToBackground($"{source}.CaptureEngine.Start", () =>
+                {
+                    var captureStartedAt = Stopwatch.GetTimestamp();
+                    StartupLog.Info($"{source}: calling CaptureEngine.Start on background thread");
+                    try
+                    {
+                        _captureEngine.Start(item!);
+                    }
+                    catch (Exception ex)
+                    {
+                        StartupLog.Warn($"{source}: CaptureEngine.Start failed during eager setup", ex);
+                        _dispatchToUiThread($"{source}.EagerSetupStartException", () =>
+                        {
+                            if (generation == _setupGeneration)
+                            {
+                                _setupInProgress = false;
+                                _setupReady = false;
+                                _captureStarted = false;
+                                _captureEngine.FrameArrived -= OnFrameArrived;
+                            }
+
+                            StartupLog.Info($"{source}: eager setup end after CaptureEngine.Start exception, elapsed={ElapsedMilliseconds(setupStartedAt):F3} ms");
+                        });
+                        return;
+                    }
+
+                    StartupLog.Info($"{source}: CaptureEngine.Start returned, elapsed={ElapsedMilliseconds(captureStartedAt):F3} ms");
+
+                    _dispatchToUiThread($"{source}.EagerSetupComplete", () =>
+                    {
+                        if (!IsBlurEnabled || generation != _setupGeneration || !_windowTracker.IsWindowPresent)
+                        {
+                            StartupLog.Info($"{source}: eager setup completed after teardown; ignoring completion");
+                            return;
+                        }
+
+                        _setupReady = true;
+                        _setupInProgress = false;
+                        StartupLog.Info($"{source}: eager setup end, elapsed={ElapsedMilliseconds(setupStartedAt):F3} ms");
+                        ApplyVisibilityForCurrentWindow($"{source}.EagerSetupComplete");
+                    });
+                });
+            });
+        });
     }
 
-    private void StopCapture()
+    private void ShowOverlayOffscreenForSetup(string source)
     {
-        if (!_captureStarted) return;
-        _captureStarted = false;
-        _captureEngine.FrameArrived -= OnFrameArrived;
-        _captureEngine.Stop();
-        _overlayWindow.Hide();
+        StartupLog.Info($"{source}: preparing OverlayWindow with opaque placeholder for offscreen eager setup");
+        _overlayWindow.ShowPlaceholder();
+        var bounds = CacheCurrentOrDefaultBounds(source);
+        StartupLog.Info($"{source}: creating OverlayWindow HWND visible but parked offscreen");
+        _overlayWindow.ShowOffscreen(bounds);
+        _overlayVisible = false;
+        _windowTracker.SetOverlayWindowHandle(_overlayWindow.WindowHandle);
+        StartupLog.Info($"{source}: OverlayWindow.ShowOffscreen returned, HWND=0x{_overlayWindow.WindowHandle:X}");
+    }
+
+    private Rect CacheCurrentOrDefaultBounds(string source)
+    {
+        var bounds = _windowTracker.CurrentBounds ?? _lastKnownBounds ?? SystemParameters.WorkArea;
+        _lastKnownBounds = bounds;
+        StartupLog.Info($"{source}: current/default OverlayWindow bounds {bounds}");
+        return bounds;
+    }
+
+    private void TearDownCaptureAndOverlay(string source)
+    {
+        _setupGeneration++;
+        _setupInProgress = false;
+        _setupReady = false;
+
+        if (_captureStarted)
+        {
+            _captureStarted = false;
+            _captureEngine.FrameArrived -= OnFrameArrived;
+            StartupLog.Info($"{source}: stopping CaptureEngine");
+            _captureEngine.Stop();
+        }
+
+        HideOverlay(source);
+        _windowTracker.SetOverlayWindowHandle(IntPtr.Zero);
+        StartupLog.Info($"{source}: destroying OverlayWindow HWND");
+        _overlayWindow.Destroy();
+    }
+
+    private void HideOverlay(string source)
+    {
+        if (!_overlayVisible)
+        {
+            StartupLog.Info($"{source}: overlay already parked offscreen; skipping duplicate MoveOffscreen");
+            return;
+        }
+
+        StartupLog.Info($"{source}: moving overlay offscreen");
+        _overlayWindow.MoveOffscreen();
+        _overlayVisible = false;
+        StartupLog.Info($"{source}: overlay moved offscreen");
+    }
+
+    private void ShowOverlay(string source, long? eventTimestamp = null)
+    {
+        if (!_setupReady)
+        {
+            StartupLog.Info($"{source}: cannot show overlay yet; eager setup ready={_setupReady}, inProgress={_setupInProgress}");
+            BeginEagerSetup(source);
+            return;
+        }
+
+        if (_overlayVisible)
+        {
+            StartupLog.Info($"{source}: overlay already active; skipping duplicate MoveToBounds");
+            return;
+        }
+
+        var bounds = CacheCurrentOrDefaultBounds(source);
+        StartupLog.Info($"{source}: moving overlay on-screen to bounds {bounds}");
+        _overlayWindow.MoveToBounds(bounds);
+        _overlayVisible = true;
+        TransitionToActive(source);
+        var elapsedText = eventTimestamp.HasValue ? $", event-to-move={ElapsedMilliseconds(eventTimestamp.Value):F3} ms" : string.Empty;
+        StartupLog.Info($"{source}: overlay move applied to bounds {bounds}{elapsedText}; expected privacy-critical event-to-move under 20 ms");
     }
 
     private void OnBoundsChanged(object? sender, Rect bounds)
     {
-        StartupLog.Info($"EnableBlur: setting OverlayWindow bounds to {bounds}");
-        _lastKnownBounds = bounds;
-        _overlayWindow.SetBounds(bounds);
+        StartupLog.Info($"OnBoundsChanged: received tracker bounds {bounds}; dispatching overlay work to UI thread");
 
-        // WhatsApp may not have been running when blur was enabled; try to start capture now.
-        if (!_captureStarted && _captureItemFactory.TryCreateForWhatsApp(out var item))
-            StartCapture(item!);
+        _dispatchToUiThread("OnBoundsChanged", () =>
+        {
+            if (!IsBlurEnabled)
+                return;
+
+            _lastKnownBounds = bounds;
+            if (_setupReady)
+            {
+                if (_activation.State == BlurActivationState.Active && BoundsOutgrewLastBlurredFrame(bounds))
+                {
+                    StartupLog.Info(
+                        "OnBoundsChanged: overlay bounds outgrew last blurred frame " +
+                        $"{_lastBlurredFrameWidth}x{_lastBlurredFrameHeight}; showing placeholder until resized frame arrives");
+                    _overlayWindow.ShowPlaceholder();
+                }
+
+                if (_activation.State == BlurActivationState.Active)
+                {
+                    StartupLog.Info($"OnBoundsChanged: moving active overlay to bounds {bounds}");
+                    _overlayWindow.MoveToBounds(bounds);
+                    _overlayVisible = true;
+                }
+                else
+                {
+                    StartupLog.Info($"OnBoundsChanged: setup ready while armed; keeping overlay parked offscreen");
+                }
+            }
+
+            if (_windowTracker.IsWindowPresent)
+                BeginEagerSetup("OnBoundsChanged");
+
+            ApplyVisibilityForCurrentWindow("OnBoundsChanged");
+        });
     }
+
+    private void OnMinimizedChanged(object? sender, bool isMinimized)
+    {
+        var priority = isMinimized ? DispatcherPriority.Normal : DispatcherPriority.Send;
+        var eventReceivedAt = Stopwatch.GetTimestamp();
+        DiagLog.Info($"OnMinimizedChanged: received minimized={isMinimized}; dispatching overlay work to UI thread at priority={priority}");
+
+        _dispatchToUiThread("OnMinimizedChanged", () =>
+        {
+            DiagLog.Info($"OnMinimizedChanged: applying minimized={isMinimized} on UI thread");
+
+            if (!IsBlurEnabled)
+                return;
+
+            if (isMinimized)
+            {
+                TransitionToArmed("OnMinimizedChanged");
+                HideOverlay("OnMinimizedChanged");
+                return;
+            }
+
+            if (!_windowTracker.IsWindowPresent)
+            {
+                TransitionToArmed("OnMinimizedChanged");
+                return;
+            }
+
+            if (_windowTracker.IsOccluded)
+            {
+                DiagLog.Info("OnMinimizedChanged: restore arrived while WhatsApp is still occluded; keeping overlay hidden");
+                TransitionToArmed("OnMinimizedChanged");
+                return;
+            }
+
+            ShowOverlay("OnMinimizedChanged", eventReceivedAt);
+        }, priority);
+    }
+
+    private void OnOcclusionChanged(object? sender, bool isOccluded)
+    {
+        var priority = isOccluded ? DispatcherPriority.Normal : DispatcherPriority.Send;
+        var eventReceivedAt = Stopwatch.GetTimestamp();
+        DiagLog.Info($"OnOcclusionChanged: received occluded={isOccluded}; dispatching overlay work to UI thread at priority={priority}");
+
+        _dispatchToUiThread("OnOcclusionChanged", () =>
+        {
+            DiagLog.Info($"OnOcclusionChanged: applying occluded={isOccluded} on UI thread");
+
+            if (!IsBlurEnabled)
+                return;
+
+            if (isOccluded)
+            {
+                TransitionToArmed("OnOcclusionChanged");
+                HideOverlay("OnOcclusionChanged");
+                return;
+            }
+
+            if (!_windowTracker.IsWindowPresent || _windowTracker.IsMinimized)
+            {
+                TransitionToArmed("OnOcclusionChanged");
+                return;
+            }
+
+            ShowOverlay("OnOcclusionChanged", eventReceivedAt);
+        }, priority);
+    }
+
+    private void OnWindowPresenceChanged(object? sender, bool isPresent)
+    {
+        DiagLog.Info($"OnWindowPresenceChanged: received present={isPresent}; dispatching overlay work to UI thread");
+
+        _dispatchToUiThread("OnWindowPresenceChanged", () =>
+        {
+            if (!IsBlurEnabled)
+                return;
+
+            if (!isPresent)
+            {
+                _lastKnownBounds = null;
+                TearDownCaptureAndOverlay("OnWindowPresenceChanged");
+                TransitionToArmed("OnWindowPresenceChanged");
+                return;
+            }
+
+            if (_windowTracker.CurrentBounds.HasValue)
+                _lastKnownBounds = _windowTracker.CurrentBounds.Value;
+
+            BeginEagerSetup("OnWindowPresenceChanged");
+        });
+    }
+
+    private void ApplyVisibilityForCurrentWindow(string source)
+    {
+        if (!IsBlurEnabled)
+            return;
+
+        if (!_windowTracker.IsWindowPresent || _windowTracker.IsMinimized || _windowTracker.IsOccluded)
+        {
+            TransitionToArmed(source);
+            HideOverlay(source);
+            return;
+        }
+
+        ShowOverlay(source);
+    }
+
+    private void TransitionToIdle(string source)
+    {
+        var previous = _activation.State;
+        _activation.Disable();
+        LogStateTransition(source, previous);
+    }
+
+    private void TransitionToArmed(string source)
+    {
+        var previous = _activation.State;
+        if (previous == BlurActivationState.Idle)
+            _activation.Enable();
+        else
+            _activation.Arm();
+
+        LogStateTransition(source, previous);
+    }
+
+    private void TransitionToActive(string source)
+    {
+        var previous = _activation.State;
+        _activation.Activate();
+        LogStateTransition(source, previous);
+    }
+
+    private void LogStateTransition(string source, BlurActivationState previous)
+    {
+        if (previous == _activation.State)
+            StartupLog.Info($"{source}: state remains {_activation.State}");
+        else
+            StartupLog.Info($"{source}: state transition {previous}->{_activation.State}");
+    }
+
+    private static void DispatchToWpfUiThread(string source, Action action, DispatcherPriority priority = DispatcherPriority.Normal)
+    {
+        var dispatcher = Application.Current?.Dispatcher;
+        if (dispatcher is null)
+        {
+            DiagLog.Warn($"{source}: Application.Current is null; dropping tracker event during shutdown");
+            return;
+        }
+
+        if (dispatcher.HasShutdownStarted || dispatcher.HasShutdownFinished)
+        {
+            DiagLog.Warn($"{source}: UI dispatcher is shutting down; dropping tracker event");
+            return;
+        }
+
+        var dispatchRequestedAt = Stopwatch.GetTimestamp();
+        dispatcher.BeginInvoke(
+            () =>
+            {
+                try
+                {
+                    var elapsedMilliseconds =
+                        (Stopwatch.GetTimestamp() - dispatchRequestedAt) * 1000.0 / Stopwatch.Frequency;
+                    DiagLog.Info($"{source}: UI dispatch queue latency {elapsedMilliseconds:F3} ms at priority={priority}");
+                    action();
+                }
+                catch (Exception ex)
+                {
+                    DiagLog.Warn($"{source}: UI-dispatched tracker event failed", ex);
+                }
+            },
+            priority);
+    }
+
+    private static void DispatchToThreadPool(string source, Action action)
+    {
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                action();
+            }
+            catch (Exception ex)
+            {
+                StartupLog.Warn($"{source}: background work failed", ex);
+            }
+        });
+    }
+
+    private static double ElapsedMilliseconds(long startedAt) =>
+        (Stopwatch.GetTimestamp() - startedAt) * 1000.0 / Stopwatch.Frequency;
 
     private void OnFrameArrived(object? sender, ICaptureFrame frame)
     {
@@ -150,7 +564,7 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
 
         try
         {
-            var sz = frame.Frame.ContentSize;
+            var sz = frame.ContentSize;
             if (count <= 10 || count % 30 == 0)
                 StartupLog.Info($"FrameArrived #{count}: dims={sz.Width}x{sz.Height}");
 
@@ -164,6 +578,9 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
             }
 
             _overlayWindow.PresentFrame(blurred);
+            Interlocked.Exchange(ref _lastBlurredFrameWidth, sz.Width);
+            Interlocked.Exchange(ref _lastBlurredFrameHeight, sz.Height);
+            Interlocked.Exchange(ref _lastBlurredFrameTimestamp, Stopwatch.GetTimestamp());
         }
         catch (Exception ex)
         {
@@ -171,6 +588,16 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
             StartupLog.Warn($"FrameArrived #{count}: EXCEPTION {ex.GetType().FullName}: {ex.Message} (exception #{exceptionCount})");
             StartupLog.Warn($"FrameArrived #{count}: stack: {ex.StackTrace}");
         }
+    }
+
+    private bool BoundsOutgrewLastBlurredFrame(Rect bounds)
+    {
+        int width = Interlocked.CompareExchange(ref _lastBlurredFrameWidth, 0, 0);
+        int height = Interlocked.CompareExchange(ref _lastBlurredFrameHeight, 0, 0);
+        if (width <= 0 || height <= 0)
+            return true;
+
+        return bounds.Width > width + 1 || bounds.Height > height + 1;
     }
 
     private void OnHotkeyPressed(object? sender, EventArgs e) => ToggleBlur();
@@ -182,12 +609,15 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
 
         _hotkeyService.HotkeyPressed -= OnHotkeyPressed;
 
-        if (_isBlurEnabled)
+        if (IsBlurEnabled)
         {
-            StopCapture();
+            TearDownCaptureAndOverlay("Dispose");
+            TransitionToIdle("Dispose");
             _windowTracker.BoundsChanged -= OnBoundsChanged;
+            _windowTracker.MinimizedChanged -= OnMinimizedChanged;
+            _windowTracker.OcclusionChanged -= OnOcclusionChanged;
+            _windowTracker.WindowPresenceChanged -= OnWindowPresenceChanged;
             _windowTracker.Stop();
-            _isBlurEnabled = false;
         }
 
         // ICaptureEngine and IWindowTracker don't expose Dispose on their interfaces;

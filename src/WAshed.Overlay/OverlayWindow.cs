@@ -16,7 +16,7 @@ namespace WAshed.Overlay;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Must be constructed and <see cref="Show"/>n on the WPF UI (STA) thread.
+/// Must be constructed and shown on the WPF UI (STA) thread.
 /// <see cref="PresentFrame"/> may be called from any thread.
 /// </para>
 /// <para>
@@ -28,25 +28,40 @@ namespace WAshed.Overlay;
 /// </remarks>
 public sealed class OverlayWindow : IOverlayWindow
 {
-    private readonly Window        _window;
-    private readonly Grid          _contentRoot;
-    private readonly Image         _image;
-    private readonly D3DImage      _d3dImage;
+    internal const double OffscreenParkX = -32000;
+    internal const double OffscreenParkY = -32000;
+
+    private Window        _window = null!;
+    private Grid          _contentRoot = null!;
+    private Image         _image = null!;
+    private Border        _placeholder = null!;
+    private D3DImage      _d3dImage = null!;
     private readonly ID3DImageBridge _bridge;
+    private readonly IWindowBoundsApplier _boundsApplier;
+    private HwndSource? _hwndSource;
     private Rect? _requestedBounds;
+    private bool _isParked = true;
     private bool _disposed;
 
     private int _presentFrameCount;
     private int _presentExceptionCount;
     private int _visualTreeLogged;
 
+    public IntPtr WindowHandle => new WindowInteropHelper(_window).Handle;
+
     /// <summary>Creates an overlay with the default GPU bridge.</summary>
     public OverlayWindow() : this(null) { }
 
     /// <param name="bridge">Bridge override for internal/test use; must not be null.</param>
-    internal OverlayWindow(ID3DImageBridge? bridge)
+    internal OverlayWindow(ID3DImageBridge? bridge, IWindowBoundsApplier? boundsApplier = null)
     {
         _bridge = bridge ?? new D3DImageBridge();
+        _boundsApplier = boundsApplier ?? new WindowBoundsApplier();
+        CreateWindow();
+    }
+
+    private void CreateWindow()
+    {
         _d3dImage = new D3DImage();
         _image    = new Image
         {
@@ -56,12 +71,22 @@ public sealed class OverlayWindow : IOverlayWindow
             Stretch             = Stretch.Fill,
         };
 
+        _placeholder = new Border
+        {
+            Background          = new SolidColorBrush(Color.FromRgb(32, 44, 51)),
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment   = VerticalAlignment.Stretch,
+            IsHitTestVisible    = false,
+            Visibility          = Visibility.Visible,
+        };
+
         _contentRoot = new Grid
         {
             HorizontalAlignment = HorizontalAlignment.Stretch,
             VerticalAlignment   = VerticalAlignment.Stretch,
         };
         _contentRoot.Children.Add(_image);
+        _contentRoot.Children.Add(_placeholder);
 
         _window = new Window
         {
@@ -74,17 +99,19 @@ public sealed class OverlayWindow : IOverlayWindow
             Background        = Brushes.Transparent,
             Topmost           = true,
             ShowInTaskbar     = false,
-            // Start off-screen at zero size; caller drives position via SetBounds.
-            Left   = 0,
-            Top    = 0,
-            Width  = 0,
-            Height = 0,
+            Left   = OffscreenParkX,
+            Top    = OffscreenParkY,
+            Width  = 1,
+            Height = 1,
             Content = _contentRoot,
         };
 
         // SourceInitialized fires once, after the HWND has been created (on Show()).
         _window.SourceInitialized += OnSourceInitialized;
     }
+
+    private const int WM_NCHITTEST = 0x0084;
+    private static readonly IntPtr HTTRANSPARENT = new(-1);
 
     private void OnSourceInitialized(object? sender, EventArgs e)
     {
@@ -100,52 +127,143 @@ public sealed class OverlayWindow : IOverlayWindow
 
         NativeWindow.SetWindowLong(hwnd, NativeWindow.GWL_EXSTYLE, exStyle);
 
-        if (_requestedBounds.HasValue)
+        _hwndSource = HwndSource.FromHwnd(hwnd);
+        _hwndSource?.AddHook(WndProcHook);
+        DiagLog.Info("OverlayWindow: installed WM_NCHITTEST -> HTTRANSPARENT hook for non-client click-through");
+
+        if (_isParked)
+            ApplyBounds(GetParkedBounds(), "SourceInitialized offscreen park");
+        else if (_requestedBounds.HasValue)
             ApplyBounds(_requestedBounds.Value, "SourceInitialized");
     }
 
-    /// <inheritdoc/>
-    public void Show()
+    private IntPtr WndProcHook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
-        DiagLog.Info($"OverlayWindow.Show: entry, current Visibility={_window.Visibility}");
-        _window.Show();
-        var hwnd = new WindowInteropHelper(_window).Handle;
-        DiagLog.Info($"OverlayWindow.Show: window shown, HWND=0x{hwnd:X}, IsVisible={_window.IsVisible}");
+        if (msg == WM_NCHITTEST)
+        {
+            handled = true;
+            return HTTRANSPARENT;
+        }
 
-        if (_requestedBounds.HasValue)
-            ApplyBounds(_requestedBounds.Value, "Show post-HWND");
+        return IntPtr.Zero;
+    }
 
-        if (Interlocked.Exchange(ref _visualTreeLogged, 1) == 0)
-            DiagLog.Info($"OverlayWindow.Show: visual tree = {DescribeVisualTree()}");
-
-        _window.Dispatcher.BeginInvoke(
-            () => DiagLog.Info(
-                "OverlayWindow.Show: post-show window size = " +
-                $"Window={_window.ActualWidth:0.#}x{_window.ActualHeight:0.#}, " +
-                $"Grid={_contentRoot.ActualWidth:0.#}x{_contentRoot.ActualHeight:0.#}, " +
-                $"Image={_image.ActualWidth:0.#}x{_image.ActualHeight:0.#}"),
-            DispatcherPriority.Loaded);
+    private void EnsureVisible()
+    {
+        if (!_window.IsVisible)
+            _window.Show();
+        else
+            _window.Visibility = Visibility.Visible;
     }
 
     /// <inheritdoc/>
-    public void Hide() => _window.Hide();
+    public void ShowOffscreen(Rect initialBounds)
+    {
+        DiagLog.Info($"OverlayWindow.ShowOffscreen: entry, current Visibility={_window.Visibility}");
+        ShowPlaceholder();
+        _requestedBounds = initialBounds;
+        _isParked = true;
+        var parkedBounds = GetParkedBounds();
+        ApplyWpfBoundsOnly(parkedBounds);
+        EnsureVisible();
+        ApplyBounds(parkedBounds, "ShowOffscreen post-HWND");
+
+        var hwnd = WindowHandle;
+        DiagLog.Info(
+            "OverlayWindow.ShowOffscreen: " +
+            $"HWND=0x{hwnd:X}, IsVisible={_window.IsVisible}, Visibility={_window.Visibility}, " +
+            $"ParkX={parkedBounds.Left}, ParkY={parkedBounds.Top}");
+
+        if (Interlocked.Exchange(ref _visualTreeLogged, 1) == 0)
+            DiagLog.Info($"OverlayWindow.ShowOffscreen: visual tree = {DescribeVisualTree()}");
+
+        LogActualSizeAfterApply("ShowOffscreen loaded");
+    }
 
     /// <inheritdoc/>
-    public void SetBounds(Rect bounds)
+    public void MoveToBounds(Rect bounds)
     {
-        DiagLog.Info($"OverlayWindow.SetBounds: setting to Left={bounds.Left}, Top={bounds.Top}, Width={bounds.Width}, Height={bounds.Height}");
+        DiagLog.Info(
+            "OverlayWindow.MoveToBounds: " +
+            $"Left={bounds.Left}, Top={bounds.Top}, Width={bounds.Width}, Height={bounds.Height}");
         _requestedBounds = bounds;
-        ApplyBounds(bounds, "SetBounds");
+        _isParked = false;
+        EnsureVisible();
+        ApplyBounds(bounds, "MoveToBounds");
+    }
+
+    /// <inheritdoc/>
+    public void MoveOffscreen()
+    {
+        var parkedBounds = GetParkedBounds();
+        DiagLog.Info(
+            "OverlayWindow.MoveOffscreen: " +
+            $"ParkX={parkedBounds.Left}, ParkY={parkedBounds.Top}, Width={parkedBounds.Width}, Height={parkedBounds.Height}");
+        ShowPlaceholder();
+        _isParked = true;
+        EnsureVisible();
+        ApplyBounds(parkedBounds, "MoveOffscreen");
+    }
+
+    /// <inheritdoc/>
+    public void Destroy()
+    {
+        if (_disposed) return;
+
+        DiagLog.Info($"OverlayWindow.Destroy: entry, HWND=0x{WindowHandle:X}, Visibility={_window.Visibility}");
+        _hwndSource?.RemoveHook(WndProcHook);
+        _hwndSource = null;
+        _window.SourceInitialized -= OnSourceInitialized;
+        _window.Close();
+        CreateWindow();
+        _requestedBounds = null;
+        _isParked = true;
+        DiagLog.Info("OverlayWindow.Destroy: recreated offscreen overlay window for next setup");
+    }
+
+    /// <inheritdoc/>
+    public void ShowPlaceholder()
+    {
+        DiagLog.Info("OverlayWindow.ShowPlaceholder: showing opaque placeholder until next frame");
+        _placeholder.Visibility = Visibility.Visible;
     }
 
     private void ApplyBounds(Rect bounds, string reason)
     {
         DiagLog.Info($"OverlayWindow.ApplyBounds ({reason}): Left={bounds.Left}, Top={bounds.Top}, Width={bounds.Width}, Height={bounds.Height}");
+        _boundsApplier.Apply(_window, bounds, reason);
+        LogActualSizeAfterApply(reason);
+    }
+
+    private void ApplyWpfBoundsOnly(Rect bounds)
+    {
         _window.SizeToContent = SizeToContent.Manual;
-        _window.Left   = bounds.Left;
-        _window.Top    = bounds.Top;
-        _window.Width  = bounds.Width;
+        _window.MaxWidth = double.PositiveInfinity;
+        _window.MaxHeight = double.PositiveInfinity;
+        _window.Left = bounds.Left;
+        _window.Top = bounds.Top;
+        _window.Width = bounds.Width;
         _window.Height = bounds.Height;
+    }
+
+    private Rect GetParkedBounds()
+    {
+        var sizeSource = _requestedBounds ?? new Rect(0, 0, 1, 1);
+        var width = Math.Max(1, sizeSource.Width);
+        var height = Math.Max(1, sizeSource.Height);
+        return new Rect(OffscreenParkX, OffscreenParkY, width, height);
+    }
+
+    private void LogActualSizeAfterApply(string reason)
+    {
+        _window.Dispatcher.BeginInvoke(
+            () => DiagLog.Info(
+                $"OverlayWindow.ApplyBounds ({reason}): actual size after apply = " +
+                $"ActualWidth={_window.ActualWidth:0.#}, ActualHeight={_window.ActualHeight:0.#}, " +
+                $"Width={_window.Width:0.#}, Height={_window.Height:0.#}, " +
+                $"Grid={_contentRoot.ActualWidth:0.#}x{_contentRoot.ActualHeight:0.#}, " +
+                $"Image={_image.ActualWidth:0.#}x{_image.ActualHeight:0.#}"),
+            DispatcherPriority.Loaded);
     }
 
     /// <inheritdoc/>
@@ -166,6 +284,11 @@ public sealed class OverlayWindow : IOverlayWindow
                 }
 
                 _bridge.UpdateD3DImage(_d3dImage, target);
+                if (_placeholder.Visibility != Visibility.Collapsed)
+                {
+                    _placeholder.Visibility = Visibility.Collapsed;
+                    DiagLog.Info($"PresentFrame #{frameNumber}: hid opaque placeholder after frame present");
+                }
             });
         }
         catch (Exception ex)
@@ -212,6 +335,9 @@ public sealed class OverlayWindow : IOverlayWindow
         if (_disposed) return;
         _disposed = true;
         _bridge.Dispose();
+        _hwndSource?.RemoveHook(WndProcHook);
+        _hwndSource = null;
+        _window.SourceInitialized -= OnSourceInitialized;
         // BeginInvoke avoids deadlock when Dispose is called from the UI thread.
         _window.Dispatcher.BeginInvoke(_window.Close);
     }

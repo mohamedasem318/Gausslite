@@ -17,7 +17,20 @@ namespace WAshed.Core.Tests.Blur;
 /// </summary>
 public sealed class Win2DBlurRenderTargetTests
 {
-    private static bool GpuAvailable => GraphicsCaptureSession.IsSupported();
+    private static bool GpuAvailable
+    {
+        get
+        {
+            try
+            {
+                return GraphicsCaptureSession.IsSupported();
+            }
+            catch
+            {
+                return false;
+            }
+        }
+    }
 
     /// <summary>
     /// GetDirect3DSurface must return a non-null surface and the same instance on every call.

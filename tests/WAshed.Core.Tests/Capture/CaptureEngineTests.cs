@@ -1,5 +1,6 @@
 using NSubstitute;
 using WAshed.Core.Capture;
+using Windows.Graphics;
 using Windows.Graphics.Capture;
 using Windows.Graphics.DirectX.Direct3D11;
 
@@ -94,5 +95,35 @@ public sealed class CaptureEngineTests
 
         Assert.False(disposedDuringHandler);  // not disposed while handler was executing
         frame.Received(1).Dispose();           // disposed exactly once after handler returned
+    }
+
+    [Fact]
+    public void FrameArrived_WhenContentSizeChanges_RecreatesPoolAndDropsTransitionFrame()
+    {
+        var engine = CreateEngine();
+        var firstFrame = MakeFrame(100, 100);
+        var transitionFrame = MakeFrame(200, 200);
+        var recreatedFrame = MakeFrame(200, 200);
+        var receivedFrames = new List<ICaptureFrame>();
+        _pool.TryGetNextFrame().Returns(firstFrame, transitionFrame, recreatedFrame);
+        engine.FrameArrived += (_, frame) => receivedFrames.Add(frame);
+
+        engine.Start(null!);
+        _pool.FrameArrived += Raise.Event();
+        _pool.FrameArrived += Raise.Event();
+        _pool.FrameArrived += Raise.Event();
+
+        Assert.Equal(new[] { firstFrame, recreatedFrame }, receivedFrames);
+        _pool.Received(1).Recreate(
+            _device,
+            Arg.Is<SizeInt32>(size => size.Width == 200 && size.Height == 200));
+        transitionFrame.Received(1).Dispose();
+    }
+
+    private static ICaptureFrame MakeFrame(int width, int height)
+    {
+        var frame = Substitute.For<ICaptureFrame>();
+        frame.ContentSize.Returns(new SizeInt32 { Width = width, Height = height });
+        return frame;
     }
 }
