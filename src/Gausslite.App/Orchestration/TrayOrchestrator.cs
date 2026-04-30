@@ -53,6 +53,7 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
     public event EventHandler<bool>? BlurStateChanged;
 
     public bool IsBlurEnabled => _activation.State != BlurActivationState.Idle;
+    public BlurIntensityPreset CurrentIntensity { get; private set; } = BlurIntensityPreset.Medium;
     internal BlurActivationState ActivationState => _activation.State;
 
     public TrayOrchestrator(
@@ -104,6 +105,12 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
     {
         if (IsBlurEnabled) DisableBlur();
         else EnableBlur();
+    }
+
+    public void SetIntensity(BlurIntensityPreset preset)
+    {
+        CurrentIntensity = preset;
+        _blurPipeline.BlurRadius = BlurIntensityPresets.ToRadius(preset);
     }
 
     public void EnableBlur()

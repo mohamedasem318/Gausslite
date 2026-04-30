@@ -6,6 +6,60 @@
 
 ## Session history
 
+### 2026-04-30 — Runtime-configurable blur radius + tray intensity submenu (v0.2.0)
+
+**Goal:** Two coupled items from the v0.2.0 milestone: make `BlurPipeline`'s blur
+radius runtime-configurable (it was hardcoded at 20 DIPs), and expose three presets
+(Light / Medium / Heavy) via a new tray menu submenu. Default stays at Medium = 20 DIPs
+to match the previous hardcoded behavior. No persistence — restarting resets to Medium.
+
+**Design decisions:**
+
+The pipeline's `BlurRadius` property already existed as a plain auto-property with no
+threading consideration. Since it's written from the WPF UI thread (tray click →
+`TrayOrchestrator.SetIntensity`) and read on the frame-processing background thread
+(`BlurPipeline.BlurFrame` is called from `TrayOrchestrator.OnFrameArrived` which is on
+a thread-pool thread), a `volatile` backing field was introduced. `volatile float` is
+legal in C# (float is ≤32 bits on the allowed-types list). This prevents the JIT from
+caching the value in a register between frame invocations and is consistent with how
+`TrayOrchestrator` already uses `Interlocked` for all its own cross-thread fields.
+
+`BlurIntensityPresets` is the single source of truth: `LightRadius = 10f`,
+`MediumRadius = 20f`, `HeavyRadius = 35f`. `BlurPipeline.DefaultBlurRadius` now
+`= BlurIntensityPresets.MediumRadius` so that the two constants always agree.
+A unit test (`MediumRadius_MatchesBlurPipelineDefault`) locks this invariant in.
+The pipeline is value-agnostic; the `ToRadius` helper and the enum live in the UI
+concept layer of `Gausslite.Core/Blur/` for easy reuse in v0.4.0's slider path.
+
+`TrayOrchestrator.SetIntensity(BlurIntensityPreset)` writes `BlurRadius` directly and
+tracks `CurrentIntensity` as an auto-property. No lock needed since the method is
+called on the UI thread (same thread that owns all public orchestrator methods).
+`ITrayOrchestrator` exposes `SetIntensity` and `CurrentIntensity` so `TrayIconHost`
+can wire up the submenu and set initial checkmarks without coupling to the concrete
+class.
+
+`TrayIconHost` builds the submenu by calling a `CreateIntensityItem` helper that
+captures the preset in a lambda — a simple pattern that avoids repeating the click
+handler logic three times. `UpdateIntensityCheckmarks` keeps only the clicked item
+checked and clears the others, giving radio-button visual behavior without requiring
+a custom `ItemsControl` or data binding.
+
+**Files created:**
+- `src/Gausslite.Core/Blur/BlurIntensityPreset.cs` — enum + `BlurIntensityPresets` static class
+- `tests/Gausslite.Core.Tests/Blur/BlurIntensityPresetTests.cs` — 5 tests (3 theory + 2 fact)
+
+**Files modified:**
+- `src/Gausslite.Core/Blur/BlurPipeline.cs` — `DefaultBlurRadius` references `MediumRadius`; volatile backing field
+- `src/Gausslite.App/Orchestration/ITrayOrchestrator.cs` — added `CurrentIntensity`, `SetIntensity`
+- `src/Gausslite.App/Orchestration/TrayOrchestrator.cs` — implemented `CurrentIntensity`, `SetIntensity`
+- `src/Gausslite.App/Tray/TrayIconHost.cs` — intensity submenu, `CreateIntensityItem`, `UpdateIntensityCheckmarks`
+- `tests/Gausslite.Core.Tests/Blur/BlurPipelineTests.cs` — added `BlurRadius_Default_IsMediumPreset`
+- `tests/Gausslite.App.Tests/TrayOrchestratorTests.cs` — added 4 `SetIntensity` tests
+
+**Test counts:** Core 59/59, App 40/40 (x64). Build: 0 warnings, 0 errors.
+
+---
+
 ### 2026-04-30 — IAppProfile abstraction (v0.2.0 refactor)
 
 **Goal:** Pure refactor. Extract WhatsApp-specific window-detection knowledge

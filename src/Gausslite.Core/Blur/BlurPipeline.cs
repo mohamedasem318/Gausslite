@@ -5,7 +5,8 @@ namespace Gausslite.Core.Blur;
 
 public sealed class BlurPipeline : IBlurPipeline
 {
-    public const float DefaultBlurRadius = 20.0f;
+    // DefaultBlurRadius derives from the preset table so both stay in sync.
+    public const float DefaultBlurRadius = BlurIntensityPresets.MediumRadius;
 
     private readonly IBlurInterop _interop;
     private bool _initialized;
@@ -13,7 +14,9 @@ public sealed class BlurPipeline : IBlurPipeline
     private IBlurCanvasDevice? _canvasDevice;
     private IBlurRenderTarget? _renderTarget;
 
-    public float BlurRadius { get; set; } = DefaultBlurRadius;
+    // volatile: written from UI thread (preset change), read from frame-processing thread.
+    private volatile float _blurRadius = DefaultBlurRadius;
+    public float BlurRadius { get => _blurRadius; set => _blurRadius = value; }
 
     public BlurPipeline(IBlurInterop interop)
     {

@@ -8,6 +8,7 @@ using Gausslite.Core.Capture;
 using Gausslite.Core.WindowTracking;
 using Gausslite.Overlay;
 using Windows.Graphics.Capture;
+using NSubstitute.ReceivedExtensions;
 
 namespace Gausslite.App.Tests;
 
@@ -433,5 +434,50 @@ public sealed class TrayOrchestratorTests
 
         _blurPipeline.Received(1).Dispose();
         _overlayWindow.Received(1).Dispose();
+    }
+
+    [Fact]
+    public void SetIntensity_Default_IsMedium()
+    {
+        SetupWhatsAppNotRunning();
+        using var sut = CreateSut();
+
+        Assert.Equal(BlurIntensityPreset.Medium, sut.CurrentIntensity);
+    }
+
+    [Fact]
+    public void SetIntensity_Light_SetsBlurRadiusAndUpdatesCurrentIntensity()
+    {
+        SetupWhatsAppNotRunning();
+        using var sut = CreateSut();
+
+        sut.SetIntensity(BlurIntensityPreset.Light);
+
+        _blurPipeline.Received(1).BlurRadius = BlurIntensityPresets.LightRadius;
+        Assert.Equal(BlurIntensityPreset.Light, sut.CurrentIntensity);
+    }
+
+    [Fact]
+    public void SetIntensity_Medium_SetsBlurRadiusAndUpdatesCurrentIntensity()
+    {
+        SetupWhatsAppNotRunning();
+        using var sut = CreateSut();
+
+        sut.SetIntensity(BlurIntensityPreset.Medium);
+
+        _blurPipeline.Received(1).BlurRadius = BlurIntensityPresets.MediumRadius;
+        Assert.Equal(BlurIntensityPreset.Medium, sut.CurrentIntensity);
+    }
+
+    [Fact]
+    public void SetIntensity_Heavy_SetsBlurRadiusAndUpdatesCurrentIntensity()
+    {
+        SetupWhatsAppNotRunning();
+        using var sut = CreateSut();
+
+        sut.SetIntensity(BlurIntensityPreset.Heavy);
+
+        _blurPipeline.Received(1).BlurRadius = BlurIntensityPresets.HeavyRadius;
+        Assert.Equal(BlurIntensityPreset.Heavy, sut.CurrentIntensity);
     }
 }

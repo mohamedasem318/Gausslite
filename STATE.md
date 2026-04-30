@@ -12,32 +12,31 @@ definition and CHANGELOG.md for full v0.1.x development history.
 
 ## Last session summary
 
-**2026-04-30 — IAppProfile abstraction (v0.2.0 refactor item).** Extracted
-all WhatsApp-specific window-detection knowledge behind a new `IAppProfile`
-interface (`src/Gausslite.Core/AppProfiles/`). `WhatsAppProfile` is the
-first concrete implementation: it owns the `IsAppWindow` predicate and
-`FindWindowHandle` (via a new generic `IWin32Api.FindWindowHandle(predicate)`
-method). `Win32Api.IsWhatsAppWindow` and `FindWhatsAppWindowHandle` are gone;
-the predicate logic lives only in `WhatsAppProfile`.
+**2026-04-30 — Runtime-configurable blur radius + tray intensity submenu (v0.2.0).** Added
+`BlurIntensityPreset` enum (`Light`, `Medium`, `Heavy`) and `BlurIntensityPresets` static
+class with `LightRadius = 10f`, `MediumRadius = 20f`, `HeavyRadius = 35f` and a
+`ToRadius(preset)` helper — all in `Gausslite.Core/Blur/BlurIntensityPreset.cs`.
+`BlurPipeline.DefaultBlurRadius` now derives from `BlurIntensityPresets.MediumRadius` rather
+than a freestanding literal; `BlurRadius` backing field is `volatile float` for correct
+cross-thread visibility (UI thread writes, frame-processing thread reads).
 
-`WindowTracker`, `CaptureItemFactory`, and `TrayOrchestrator` now receive
-`IAppProfile` by constructor injection. `ICaptureItemFactory.TryCreateForWhatsApp`
-renamed to `TryCreateForProfile`. `App.xaml.cs` is the sole place that
-constructs `WhatsAppProfile`. All WhatsApp-hardcoded log strings replaced with
-`_profile.Name` interpolations. Predicate unit tests moved from
-`CaptureItemFactoryTests` to a new `WhatsAppProfileTests` in Core.Tests.
-Build: 0 warnings, 0 errors. Tests: Core 53/53, App 36/36 (x64).
-(Core +20 from WhatsAppProfileTests; App -18 because the 18 predicate theory
-cases moved to Core.)
+`ITrayOrchestrator` gained `BlurIntensityPreset CurrentIntensity { get; }` and
+`SetIntensity(BlurIntensityPreset)`. `TrayOrchestrator` implements both: `SetIntensity`
+maps the preset to a radius via `BlurIntensityPresets.ToRadius` and writes it directly to
+`_blurPipeline.BlurRadius` so the next frame picks it up without a blur off/on cycle.
+Default is `Medium`. `TrayIconHost` gained a "Blur intensity" submenu with three
+radio-button-style checkable items wired to `ITrayOrchestrator.SetIntensity`.
+
+Build: 0 warnings, 0 errors. Tests: Core 59/59, App 40/40 (x64).
+(Core +6: 3 `BlurIntensityPresetTests` + 1 `BlurRadius_Default_IsMediumPreset` +
+ 2 theory cases already counted; App +4 from four new `SetIntensity` orchestrator tests.)
 
 Full session archive in HISTORY.md.
 
 ## Next up
 
-**v0.2.0 — "The right regions"** remaining items. `IAppProfile` is done.
-Recommended next: runtime-configurable blur radius + tray intensity submenu
-(Light/Medium/Heavy presets) as a self-contained pair — both are in
-`BlurPipeline` and `TrayOrchestrator` and can ship together in one session.
+**v0.2.0 — "The right regions"** remaining items. `IAppProfile` and blur-intensity
+submenu are done.
 
 v0.2.0 remaining work (no required order):
 
@@ -47,12 +46,8 @@ v0.2.0 remaining work (no required order):
   largest single piece of work. Will extend `IAppProfile` when it lands.
 - Pixel-region occlusion clipping (replaces v0.1.0 center-point
   hide-all behavior when WhatsApp is partially behind another window)
-- Runtime-configurable blur radius in BlurPipeline (currently
-  hardcoded at 20 DIPs)
-- Tray menu intensity submenu (Light / Medium / Heavy presets,
-  exposing the runtime-configurable radius via the tray)
 - Tray menu region scope submenu ("Blur chat list" / "Blur
-  conversation" / "Blur both")
+  conversation" / "Blur both") — depends on RegionDetector
 - Smoke test on 3 different WhatsApp Desktop layouts (default, narrow, wide)
 
 ## Blockers
@@ -62,6 +57,17 @@ None. v0.1.1 is shipped clean. v0.2.0 is unblocked.
 ## Recent decisions
 
 (See `PLAN.md` Decisions Log for the full history.)
+
+- **`BlurIntensityPresets` is the single source of truth for preset numeric values.**
+  `BlurPipeline.DefaultBlurRadius` derives from `BlurIntensityPresets.MediumRadius`
+  so both always agree. Future slider code in v0.4.0 bypasses the preset entirely
+  and writes a radius float directly to `BlurPipeline.BlurRadius`.
+
+- **`BlurRadius` backing field is `volatile float`.** Written from the WPF UI thread
+  (tray menu click → `TrayOrchestrator.SetIntensity`), read from the frame-processing
+  thread. `volatile` prevents the JIT from caching the value in a register across
+  frame invocations and matches the existing Interlocked-for-cross-thread-writes
+  pattern in `TrayOrchestrator`.
 
 - **`IWin32Api.FindWindowHandle(predicate)` is the generic window-finder.**
   `WhatsAppProfile.FindWindowHandle()` calls it with `IsAppWindow` as the

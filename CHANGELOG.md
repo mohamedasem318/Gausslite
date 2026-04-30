@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Tray menu: "Blur intensity" submenu with Light (10 DIPs), Medium (20 DIPs), and
+  Heavy (35 DIPs) presets. Checkmark tracks the current selection. Switching preset
+  takes effect on the next captured frame with no blur off/on cycle required.
+  Default is Medium, matching the previous hardcoded behavior.
+
 ### Changed
 - Updated tray icon to match new Gausslite branding.
 - Internal refactor: WhatsApp-specific window-detection knowledge extracted behind
