@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to WAshed will be documented in this file.
+All notable changes to Gausslite will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
@@ -38,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Global exception logger writes uncaught errors to `washed-crash.log` next to the executable, so silent failures are no longer silent. Hooks both `AppDomain.UnhandledException` (fatal) and `DispatcherUnhandledException` (non-fatal, sets `Handled = true` to keep the app running).
 
 ### Changed
+- Project renamed to Gausslite. Solution file, project files, namespaces, folders, assembly names, executable name, and log file names all updated. No functional changes.
 - WindowTracker bounds-change diagnostics now log the first change and then every tenth change, so window dragging remains visible in logs without flooding `washed-startup.log`.
 - Build now targets x64 explicitly (was AnyCPU); Win2D's native dependencies now deploy correctly (`Microsoft.Graphics.Canvas.dll` at `runtimes/win-x64/native/`).
 - Tray icon library swapped from H.NotifyIcon.Wpf to Hardcodet.NotifyIcon.Wpf for reliability.
