@@ -5,33 +5,39 @@
 
 ## Vision
 
-Gausslite automatically blurs WhatsApp chat content when the user is sharing
-their screen, so private messages aren't accidentally broadcast in meetings.
+Gausslite automatically blurs sensitive chat content when the user is
+sharing their screen, so private messages aren't accidentally broadcast
+in meetings.
 
-The product targets a real gap: existing solutions are browser extensions
-that only work on WhatsApp Web, or generic advice ("use a second monitor",
-"share a specific app"). Nobody has built a polished desktop app that does
-this for WhatsApp Desktop.
+The product targets a real gap: existing solutions are browser
+extensions that only work on web versions of chat apps, or generic
+advice ("use a second monitor", "share a specific app"). Nobody has
+built a polished desktop app that does this for the major chat
+clients people use day-to-day.
+
+v0.x focuses on WhatsApp Desktop as the first and most-requested
+target. v0.6.0 expands to Signal, Telegram, Discord, and Slack via the
+IAppProfile interface introduced in v0.2.0.
 
 ## Architecture
 
 ### v0 — Overlay (current target)
 ```
-┌─────────────────────────────────────────────────┐
-│  Tray App (WPF, hidden main window)             │
-│  ├─ ScreenShareDetector (process scan, ~1s)     │
-│  ├─ WindowTracker (Win32, tracks WA window)     │
-│  ├─ RegionDetector (UIA + CV fallback)          │
-│  └─ OverlayWindow (transparent, topmost)        │
-│         ↓                                       │
-│  ┌──────────────────────────────────────────┐   │
-│  │ Capture pipeline (per frame, ~60fps)     │   │
-│  │   1. GraphicsCaptureSession on WA window │   │
-│  │   2. Get D3D11Texture2D frame            │   │
-│  │   3. Win2D: draw frame, blur chat region │   │
-│  │   4. Present via D3DImage                │   │
-│  └──────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│  Tray App (WPF, hidden main window)                  │
+│  ├─ ScreenShareDetector (process scan, ~1s)          │
+│  ├─ WindowTracker (Win32, tracks WhatsApp window)    │
+│  ├─ RegionDetector (UIA + CV fallback)               │
+│  └─ OverlayWindow (transparent, topmost)             │
+│         ↓                                            │
+│  ┌────────────────────────────────────────────────┐  │
+│  │ Capture pipeline (per frame, ~60fps)           │  │
+│  │   1. GraphicsCaptureSession on WhatsApp window │  │
+│  │   2. Get D3D11Texture2D frame                  │  │
+│  │   3. Win2D: draw frame, blur chat region       │  │
+│  │   4. Present via D3DImage                      │  │
+│  └────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────┘
 ```
 Tradeoff: the overlay is visible to both the user and viewers. Same
 limitation as browser blur extensions. Acceptable for v0 — when sharing,
@@ -69,35 +75,103 @@ covered by manual smoke tests.
 
 ## Milestones
 
-### v0.1.0 — "Hello, blur"
+### v0.1.0 — "Hello, blur" ✅ shipped
 - WindowTracker finds WhatsApp Desktop, returns DPI-correct bounds
 - CaptureEngine produces frames at 30+ fps
 - BlurPipeline blurs the entire WA window (not yet region-aware)
-- OverlayWindow renders the blurred output
-- TrayApp toggles blur on/off via tray menu and hotkey
-- Manual smoke test passes
+- OverlayWindow renders the blurred output via D3DImage + D3D9Ex shared
+  surface bridge
+- TrayApp toggles blur on/off via tray menu and global hotkey
+- Eager armed setup: capture+overlay prepared the moment WhatsApp's
+  HWND is first seen, so restore/unocclude is a single SetWindowPos
+  move and not a fresh capture session
+- Occlusion-aware overlay: hides when WhatsApp is behind another
+  foreground window, reappears when WhatsApp is on top again
+- Manual smoke test passed
+
+### v0.1.1 — "Gausslite" ✅ shipped
+- Renamed from internal codename WAshed to Gausslite
+- No functional changes
+- Updated tray icon to match new branding
 
 ### v0.2.0 — "The right regions"
 - RegionDetector identifies chat list & conversation rects via UIA
-- CV fallback if UIA fails
-- Tray menu: "Blur chat list", "Blur conversation", "Blur both"
+  (UI Automation), with a computer-vision fallback if UIA fails
+- Tray menu options: "Blur chat list", "Blur conversation", "Blur both"
+- Tray menu intensity submenu: "Light", "Medium", "Heavy" presets
+  (mapping to fixed blur-radius values). Use case: Light keeps
+  chat silhouettes readable for the user while staying unreadable
+  for viewers, useful since the overlay is visible to both
+- BlurPipeline accepts a runtime-configurable blur radius (currently
+  hardcoded at 20 DIPs)
+- Pixel-region occlusion clipping: when WhatsApp is partially behind
+  another window, blur only the visible portion instead of hiding the
+  whole overlay (replaces the v0.1.0 center-point hide-all behavior)
+- IAppProfile abstraction: separate WhatsApp-specific knowledge
+  (window detection rules, region identification logic) from generic
+  blur infrastructure. WhatsApp becomes the first concrete
+  IAppProfile implementation. Code-quality refactor; no user-visible
+  behavior change beyond the cleaner internal seam. If multi-app
+  support is added post-v1.0, this is the interface it plugs into
 - Smoke test on 3 different WA Desktop layouts (default, narrow, wide)
 
-### v0.3.0 — "Auto-activation"
-- ScreenShareDetector identifies Zoom, Teams, Meet (Chrome/Edge), Discord, OBS
-- Blur activates within 2s of share start, deactivates within 2s of share end
-- Manual override still works
+### v0.3.0 — "Knows when to blur"
+- ScreenShareDetector identifies which app is sharing: Zoom, Teams,
+  Meet (Chrome/Edge), Discord, OBS, more as they come up
+- Share-target detection: which monitor or window the sharing client
+  has captured. If WhatsApp is on a monitor that is not being shared,
+  no blur is needed; if the sharing client is sharing a specific
+  application window other than WhatsApp, no blur is needed
+- Default-blur-if-uncertain: when the share target cannot be
+  determined, or when detection partially fails, blur is enabled
+  rather than disabled. Privacy-first fallback
+- Blur activates within 2s of share start, deactivates within 2s of
+  share end
+- Manual override (hotkey/tray toggle) still works in all states
 
 ### v0.4.0 — "Polish"
-- Settings persistence (which screen-share clients to watch, blur intensity, regions)
-- Auto-start with Windows option
-- Updater check (manual link to GitHub Releases for v0; auto-update is post-v1)
+- Settings window (opened via tray menu → "Settings..."), separate
+  from the tray menu's quick toggles. Tray menu stays as the primary
+  surface for frequent actions (enable/disable, region scope,
+  intensity preset); settings window covers configuration depth
+- Continuous blur intensity slider in settings (replaces the v0.2.0
+  Light/Medium/Heavy presets, or augments them with a custom value)
+- Screen-share client checklist: which sharing apps Gausslite should
+  watch for (Zoom, Teams, Meet, Discord, OBS, etc.)
+- Auto-start with Windows toggle (off by default)
+- Optional "notify when blur is armed" toggle (off by default —
+  armed-state silence remains the v0.1.0 default behavior; this
+  surfaces it for users who want feedback)
+- Settings persistence (currently nothing persists across launches)
+- Updater check (manual link to GitHub Releases for v0; auto-update
+  is post-v1)
+
+### v0.5.0 — "Notifications too"
+- Blur incoming WhatsApp toast notifications during screen sharing
+  (currently only the WhatsApp window is blurred; toasts that pop
+  from the system tray area are not)
+- Phase 1: live toast notifications. Phase 2: Action Center entries
+  if the user opens it during a share
+
+### v0.6.0 — "More than WhatsApp"
+- Multi-app support via the IAppProfile interface introduced in
+  v0.2.0
+- Initial app set: Signal Desktop, Telegram Desktop, Discord, Slack
+- Each app gets its own IAppProfile implementation handling: window
+  detection, region identification (chat list / conversation), and
+  any app-specific quirks
+- Tray UI gains an apps section: per-app enable/disable, per-app
+  region preferences
 
 ### v1.0.0 — "Real privacy"
-- IDD driver: phantom monitor
+- IDD driver: phantom monitor as a separate user-mode WDDM driver
+  (C++)
 - Compositor: real desktop in, selective-blur desktop out
+- User shares the phantom monitor in Zoom/Teams; real monitor stays
+  untouched
 - Installer signs driver and app with EV cert
-- Smoke test: blur invisible on real monitor, visible only in phantom share
+- Smoke test: blur invisible on real monitor, visible only in
+  phantom share
 
 ## Non-goals
 
@@ -108,27 +182,62 @@ covered by manual smoke tests.
   mind but do not build the Mac side.
 - **Mobile (iOS/Android).** Out of scope. Mobile screen-sharing privacy is a
   different product.
-- **Blurring arbitrary apps.** WhatsApp-specific by design. A generic
-  "blur any window region during share" tool is a different product with
-  different UX.
+- **Blurring arbitrary apps.** WhatsApp-specific by design through
+  v0.x and v1.0. The IAppProfile abstraction introduced in v0.2.0
+  could in principle support other chat clients (Signal, Telegram,
+  Discord, Slack) but is not committed v0.x roadmap work; multi-app
+  is a possible post-v1.0 expansion based on actual user demand.
+  A generic "blur any window region during share" tool is a
+  different product with different UX.
 - **Cloud sync, account system, telemetry.** None. Local-only.
 - **WhatsApp Web in this repo.** A Chrome extension is planned in a
   separate repo (Gausslite-Web) post-v0.
 
 ## Open questions
 
-- Should v0 ship without auto-activation (manual hotkey only) to compress
-  the timeline, then add auto-activation in v0.2.0? **Tentative: yes,
-  v0.1.0 is hotkey-only.**
-- For v1, which IDD sample to fork: Microsoft's IddCx sample or a community
-  fork? **Decide at v0.4.0.**
+- For v1, which IDD sample to fork: Microsoft's IddCx sample or a
+  community fork? **Decide at v0.4.0.**
 - Code signing cost vs. ship-without-signing-and-accept-SmartScreen-warning
   for early v1 alphas. **Decide before v1 starts.**
+- Post-v1 multi-app support: should the IAppProfile interface allow
+  user-defined profiles via a simple config file, or stay code-only
+  with one profile per supported app? **Defer until/unless multi-app
+  becomes committed work.**
 
 ## Decisions log
 
 Append-only. One line per decision with date and rationale.
-
+- 2026-04-30: Renamed project from WAshed to Gausslite. Single capital
+  G. Rationale: portmanteau of Gaussian + gaslighting, cleaner branding,
+  drops the descriptive WhatsApp prefix. v0.1.1 tagged as the rename
+  release with no functional changes.
+- 2026-04-30: Roadmap restructured. v0.3.0 redefined from
+  "auto-activation" to "knows when to blur" — covers both
+  screen-share-client process scanning AND share-target detection
+  (which monitor/window is being shared). Default-blur-if-uncertain
+  is the privacy-first activation rule. v0.5.0 added (notification
+  blur). v0.2.0 expanded to include the IAppProfile abstraction as
+  a code-quality refactor that cleanly separates app-specific
+  knowledge from blur infrastructure, plus pixel-region occlusion
+  clipping deferred from v0.1.0, plus runtime-configurable blur
+  intensity via a tray menu preset submenu.
+- 2026-04-30: Multi-app support (Signal, Telegram, Discord, Slack)
+  removed from the v0.x roadmap. Decision: IDD-before-breadth.
+  Rationale: better to ship one well-supported app with the polished
+  IDD privacy story than several apps on the visibly-imperfect
+  overlay. If multi-app demand materializes post-v1.0, IAppProfile
+  is ready; if it doesn't, no investment was wasted on a feature
+  nobody wanted.
+- 2026-04-30: Repo visibility = stay private through v0.x. Public
+  release deferred until v0.x is feature-complete with a proper
+  installer. Rationale: first impressions matter; "v0.1.1 rename
+  release" is not the right front-door artifact.
+- 2026-04-30: Tray menu vs. settings window split. Tray menu stays
+  as the primary surface for frequent toggles through v0.x. A real
+  settings window arrives in v0.4.0 for configuration depth (sliders,
+  checklists, persistence). Avoid building the settings window
+  earlier than v0.4.0; doing so risks designing UI before knowing
+  what configuration is actually needed.
 - 2026-04-28: License = AGPL-3.0. Rationale: strongest "must cite" + closes
   SaaS loophole that GPL has.
 - 2026-04-28: Stack = C# (WPF) for v0, C++ for v1 driver. Rationale: WPF
@@ -153,12 +262,17 @@ Every Claude Code session that ships a module must end with:
 
 1. All tests pass (`dotnet test` green)
 2. `STATE.md` updated:
-   - "Last session summary" reflects what was just built
+   - "Last session summary" reflects what was just built (compact;
+     1-2 paragraphs)
    - "Next up" set to the next module per the module map
    - Decisions/notes added if anything non-obvious happened
-3. `CHANGELOG.md` updated:
+3. `HISTORY.md` updated:
+   - Append a new dated session entry at the top, above the previous
+     entry, separated by `---`
+   - Verbose narrative — full context for future reference
+4. `CHANGELOG.md` updated:
    - One concise entry under `[Unreleased]` → `### Added` (or `### Changed`, `### Fixed`, etc.)
    - User-facing language, not implementation detail
    - Example: `WindowTracker module: tracks WhatsApp Desktop window bounds at 10 Hz with DPI awareness`
-4. Conventional-commit message proposed for the changes
-5. No auto-commits — user reviews and commits manually
+5. Conventional-commit message proposed for the changes
+6. No auto-commits — user reviews and commits manually
