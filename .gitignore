@@ -56,6 +56,6 @@ TestResults/
 .env.local
 secrets.json
 
-# WAshed-specific
+# Gausslite-specific
 installer/Output/
 *.signed
