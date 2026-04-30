@@ -1,4 +1,5 @@
 using System.Windows;
+using Gausslite.Core.AppProfiles;
 using Gausslite.Core.Diagnostics;
 
 namespace Gausslite.Core.WindowTracking;
@@ -6,6 +7,7 @@ namespace Gausslite.Core.WindowTracking;
 public sealed class WindowTracker : IWindowTracker, IDisposable
 {
     private readonly IWin32Api _win32;
+    private readonly IAppProfile _profile;
     public static readonly TimeSpan DefaultPollInterval = TimeSpan.FromMilliseconds(33);
 
     private readonly TimeSpan _pollInterval;
@@ -33,9 +35,10 @@ public sealed class WindowTracker : IWindowTracker, IDisposable
     public bool IsOccluded { get; private set; }
     public bool IsTracking { get; private set; }
 
-    public WindowTracker(IWin32Api win32, TimeSpan? pollInterval = null)
+    public WindowTracker(IWin32Api win32, IAppProfile profile, TimeSpan? pollInterval = null)
     {
         _win32 = win32;
+        _profile = profile;
         _pollInterval = pollInterval ?? DefaultPollInterval;
     }
 
@@ -117,7 +120,7 @@ public sealed class WindowTracker : IWindowTracker, IDisposable
                 if (!_firstWindowFound)
                 {
                     _firstWindowFound = true;
-                    DiagLog.Info($"WindowTracker: WhatsApp window detected, HWND=0x{sample.Value.Hwnd:X}, bounds={sample.Value.Bounds}, minimized={sample.Value.IsMinimized}");
+                    DiagLog.Info($"WindowTracker: {_profile.Name} window detected, HWND=0x{sample.Value.Hwnd:X}, bounds={sample.Value.Bounds}, minimized={sample.Value.IsMinimized}");
                 }
 
                 if (sample.Value.IsMinimized)
@@ -151,7 +154,7 @@ public sealed class WindowTracker : IWindowTracker, IDisposable
                 if (_lastMinimized)
                 {
                     _lastMinimized = false;
-                    DiagLog.Info("WindowTracker: minimized changed to False because WhatsApp window is no longer present");
+                    DiagLog.Info($"WindowTracker: minimized changed to False because {_profile.Name} window is no longer present");
                     MinimizedChanged?.Invoke(this, false);
                 }
 
@@ -161,7 +164,7 @@ public sealed class WindowTracker : IWindowTracker, IDisposable
                     && (DateTime.UtcNow - loopStart).TotalSeconds > 5)
                 {
                     _notFoundWarningLogged = true;
-                    DiagLog.Warn("WindowTracker: WhatsApp not found after 5 seconds — capture cannot start");
+                    DiagLog.Warn($"WindowTracker: {_profile.Name} not found after 5 seconds — capture cannot start");
                 }
             }
         }
@@ -169,7 +172,7 @@ public sealed class WindowTracker : IWindowTracker, IDisposable
 
     private (Rect Bounds, IntPtr Hwnd, bool IsMinimized, bool IsOccluded)? SampleWindowState()
     {
-        var hwnd = _win32.FindWhatsAppWindowHandle();
+        var hwnd = _profile.FindWindowHandle();
         if (hwnd == IntPtr.Zero) return null;
 
         if (_win32.IsIconic(hwnd))

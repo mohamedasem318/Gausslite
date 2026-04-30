@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Updated tray icon to match new Gausslite branding.
+- Internal refactor: WhatsApp-specific window-detection knowledge extracted behind
+  a new `IAppProfile` interface (`WhatsAppProfile` is the first implementation),
+  separating app identity from the generic blur infrastructure in preparation for
+  region-aware blur.
 
 ## [0.1.1] - 2026-04-30
 

@@ -1,5 +1,6 @@
 using NSubstitute;
 using System.Windows;
+using Gausslite.Core.AppProfiles;
 using Gausslite.Core.WindowTracking;
 
 namespace Gausslite.Core.Tests.WindowTracking;
@@ -7,6 +8,7 @@ namespace Gausslite.Core.Tests.WindowTracking;
 public sealed class WindowTrackerMinimizedTests : IDisposable
 {
     private readonly IWin32Api _win32 = Substitute.For<IWin32Api>();
+    private readonly IAppProfile _profile = Substitute.For<IAppProfile>();
     private readonly List<bool> _minimizedEvents = new();
     private readonly List<Rect> _boundsEvents = new();
     private WindowTracker? _tracker;
@@ -20,7 +22,7 @@ public sealed class WindowTrackerMinimizedTests : IDisposable
         var minimizedRect = new Rect(-32000, -32000, 160, 90);
         var restoredRect = new RECT { Left = 25, Top = 35, Right = 225, Bottom = 185 };
 
-        _win32.FindWhatsAppWindowHandle().Returns(hwnd);
+        _profile.FindWindowHandle().Returns(hwnd);
         _win32.IsIconic(hwnd).Returns(_ => isMinimized);
         _win32.GetDpiForWindow(hwnd).Returns(96u);
 
@@ -32,7 +34,7 @@ public sealed class WindowTrackerMinimizedTests : IDisposable
                   return true;
               });
 
-        _tracker = new WindowTracker(_win32, TimeSpan.FromMilliseconds(10));
+        _tracker = new WindowTracker(_win32, _profile, TimeSpan.FromMilliseconds(10));
         _tracker.MinimizedChanged += (_, minimized) => _minimizedEvents.Add(minimized);
         _tracker.BoundsChanged += (_, bounds) => _boundsEvents.Add(bounds);
 
