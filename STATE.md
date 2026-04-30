@@ -9,17 +9,291 @@
 
 ## Last session summary
 
-**OverlayWindow sizing fixed so the D3DImage host fills the tracked window bounds.**
+**v0.1.0 offscreen overlay parking privacy fix.**
 
-The previous layout fix made the D3DImage-backed `Image` stretch correctly, but the next diagnostic showed the parent overlay window was still only `14x14`. The sequence was `SetBounds -> Show`: `SetBounds` assigned `Left/Top/Width/Height` before the WPF HWND existed, then `Show()` realized the window at its tiny natural content size. The result was a valid blur frame rendered into a `14x14` overlay in the top-left corner instead of the tracked WhatsApp bounds.
+The remaining first restore leak was traced to WPF deferring layout and the
+first compositor paint while the overlay `Window` had `Visibility=Hidden`.
+The eager setup from the previous session stays in place: WhatsApp
+HWND-first-seen still runs `TryCreateForWhatsApp`, creates the overlay HWND,
+and starts `CaptureEngine` before the restore/unocclude path.
+
+The overlay parking strategy is now offscreen-but-visible. `OverlayWindow`
+creates the HWND as a WPF-visible window at `(-32000, -32000)` via
+`ShowOffscreen(initialBounds)`, keeps the opaque placeholder visible during
+setup, and never uses a hidden/visible WPF visibility flip for armed/active
+transitions. `Armed` now means capture+overlay are alive and the overlay HWND
+is parked offscreen. `Active` means the same HWND is positioned at WhatsApp's
+current bounds. Restore/unocclude calls `MoveToBounds(Rect)`; minimize or
+occlusion calls `MoveOffscreen()`. Both paths use `SetWindowPos` through the
+existing bounds applier, so the privacy-critical metric is now logged as
+`event-to-move` with an expected value under 20ms.
+
+Tests were updated away from `Visibility=Hidden` assertions. The orchestrator
+tests now assert eager `ShowOffscreen`, armed `MoveOffscreen`, active
+`MoveToBounds`, and no fresh capture setup on armed restore. New overlay tests
+verify the parked coordinates, on-screen bounds move, offscreen move, and that
+these operations occur while the WPF window remains `Visible`.
+
+**Verification:** Debug solution build passed with 0 warnings/errors using
+`dotnet build WAshed.sln -c Debug -m:1 --no-restore`. Core tests passed
+(33/33). App tests were written and attempted, but both the full x64 App test
+run and a focused `TrayOrchestratorTests` filter still hung after discovery in
+this shell, matching the documented App testhost issue. No manual WhatsApp
+smoke test was run in this session, so no real `event-to-move` numbers were
+recorded.
+
+---
+
+**v0.1.0 eager armed setup privacy fix.**
+
+The armed->active privacy leak is fixed by moving the expensive work out of
+the restore/unocclude transition. `TrayOrchestrator` now treats blur activation
+state separately from whether capture+overlay have been prepared for the
+current WhatsApp HWND. When blur is enabled and `IWindowTracker` already sees
+WhatsApp, or when `WindowPresenceChanged(true)` arrives during an armed
+session, the orchestrator eagerly runs `CaptureItemFactory.TryCreateForWhatsApp`
+on a background thread, creates the overlay HWND with the placeholder visible
+but `Visibility=Hidden`, applies the current/default bounds, and starts
+`CaptureEngine` before WhatsApp is privacy-visible.
+
+`Armed` now means blur is enabled and the overlay is hidden. If a WhatsApp HWND
+has been seen for the current session, capture+overlay are already alive; if no
+HWND has been seen yet, the app is still waiting to do that eager setup.
+`Active` means capture+overlay are alive and the overlay is visible. Minimize
+or occlusion flips visibility to hidden and keeps capture alive. Restore or
+unocclude flips visibility to visible and applies current bounds only; it does
+not call `TryCreateForWhatsApp`, `OverlayWindow.Show` on a fresh HWND, or
+`CaptureEngine.Start`. WhatsApp close is the path that stops capture and clears
+the prepared setup so reopen runs eager setup again for the new HWND.
+
+Diagnostics now log every `Idle`/`Armed`/`Active` transition, eager setup begin
+and end with elapsed milliseconds, hidden/visible flips, and the privacy-
+critical elapsed time from `MinimizedChanged(false)` or
+`OcclusionChanged(false)` receipt to the visible-flip-applied log line.
+
+**Verification:** Debug solution build passed with 0 warnings/errors. Core
+tests passed (33/33). Full App tests passed when run as x64 (51/51). A default
+AnyCPU App test invocation still hung after discovery in this shell, matching
+the previously documented testhost/platform issue; the x64 path is the valid
+one for this Win2D project. No manual WhatsApp smoke test was run in this
+session, so no real `washed-startup.log` event-to-flip number was recorded.
+
+---
+
+**v0.1.0 armed-restore dispatcher priority privacy fix.**
+
+The remaining armed->restore privacy gap was traced to WPF dispatcher queue
+latency, not the restore handler's behavior. `TrayOrchestrator` was dispatching
+all tracker events at `DispatcherPriority.Normal`, so during a WhatsApp
+restore-from-minimize the poll-thread `MinimizedChanged(false)` work could sit
+behind WPF input, layout, and render work while raw WhatsApp content was already
+visible.
+
+`TrayOrchestrator` now accepts an explicit dispatcher priority per tracker
+event, defaulting to `Normal`. Bounds changes and non-privacy transitions stay
+at `Normal`; the privacy-critical visibility transitions
+`MinimizedChanged(false)` and `OcclusionChanged(false)` dispatch at
+`DispatcherPriority.Send` so the opaque placeholder/show path jumps to the
+front of the UI queue. `DispatchToWpfUiThread` also logs the elapsed queue
+latency when the UI action runs, making future regressions visible in
+`washed-startup.log`.
+
+### Smoke test note
+- Reproduction: minimize WhatsApp, enable blur, restore WhatsApp from the
+  taskbar. The opaque placeholder should cover WhatsApp as soon as the restored
+  window appears, and the log gap between `received minimized=False` and
+  `applying minimized=False on UI thread` should be under 5ms.
+
+**Verification:** Debug solution build passed with 0 warnings/errors. Core tests
+passed (33/33). Focused `WAshed.App.Tests` execution for
+`TrayOrchestratorTests` still hangs after discovery in this shell, matching the
+pre-existing App testhost blocker from prior sessions.
+
+---
+
+**v0.1.0 armed-restore privacy fix and documented occlusion limitation.**
+
+`TrayOrchestrator` now has a testable UI-dispatch seam, and the
+`MinimizedChanged(false)` path is covered for the armed state. When WhatsApp is
+restored after blur was enabled while minimized, the orchestrator attempts
+`CaptureItemFactory.TryCreateForWhatsApp` immediately from the restore event and
+starts capture if the visible window is ready. `StartCapture` shows the opaque
+placeholder before Windows Graphics Capture delivers its first frame, so the
+restore path no longer waits for the later bounds retry before covering
+WhatsApp.
+
+The partial-occlusion behavior is documented as a known v0.1.0 limitation:
+because occlusion is currently center-point based, a partially visible WhatsApp
+window may cause the whole overlay to hide rather than clipping to the visible
+region. Pixel-region clipping is deferred to v0.2.0 alongside region-aware blur.
+
+### Smoke test note
+- Reproduction for armed->restore privacy fix: minimize WhatsApp, enable blur,
+  restore WhatsApp. Opaque placeholder must appear within one poll cycle (~33ms)
+  of WhatsApp becoming visible. Live blur replaces placeholder when first frame
+  arrives. WhatsApp content must never be readable.
+
+**Verification:** Debug solution build passed with 0 warnings/errors. Core tests
+passed (33/33). Focused `WAshed.App.Tests` execution still hangs after
+discovery via `dotnet vstest`, matching the pre-existing App testhost blocker
+from prior sessions.
+
+---
+
+**v0.1.0 final visibility/privacy fixes: occlusion-aware overlay and reliable restore placeholder.**
+
+Issue A is fixed in `WindowTracker`: each poll now checks the center point of
+WhatsApp's physical bounds with `WindowFromPoint`, normalizes child HWNDs to
+their root window, and compares that root to WhatsApp. The tracker exposes
+`OcclusionChanged` and `IsOccluded`; `TrayOrchestrator` hides the overlay while
+WhatsApp is occluded but keeps capture alive, then shows and reapplies cached
+bounds when WhatsApp becomes visible again. The overlay HWND is passed back into
+the tracker so the topmost overlay is skipped with `GetWindow(GW_HWNDNEXT)` when
+it is the window returned at the center point.
+
+Issue B is fixed by making the opaque charcoal placeholder engage on every
+privacy-sensitive show path. `OverlayWindow.Hide()` resets the placeholder to
+visible for the next show, `TrayOrchestrator` shows the placeholder before
+startup capture, and restore/unocclusion paths show it whenever the last blurred
+frame is missing or older than 5 seconds. The placeholder is hidden only after a
+successful `PresentFrame`.
 
 ### Fixed
-- **`OverlayWindow`** now caches the requested bounds and reapplies them after HWND creation (`SourceInitialized`) and immediately after `Show()` returns.
-- The backing `Window` now explicitly sets `WindowStartupLocation=Manual`, `WindowState=Normal`, `WindowStyle=None`, `ResizeMode=NoResize`, and `SizeToContent=Manual` so content measurement cannot drive the overlay size.
-- **`TrayOrchestrator`** now remembers the last tracker bounds and reapplies them after `OverlayWindow.Show()`. Bounds are still sent before capture starts, but they are also sent again once the window is realized.
-- **`OverlayWindow.Show`** now logs the post-layout size at every relevant level: `Window=WxH, Grid=WxH, Image=WxH`.
+- **Occluded WhatsApp:** overlay visibility now follows whether WhatsApp is
+  actually visible at its center point, including overlay-self-exclusion.
+- **Armed -> active privacy gap:** restore from minimized/armed state now paints
+  an opaque dark rectangle immediately until a fresh blurred frame is presented.
 
-**Next session:** run the smoke test and confirm `OverlayWindow.Show: post-show window size` reports the tracked WhatsApp bounds at the Window, Grid, and Image levels, then verify the blurred WhatsApp frame is visible.
+### Smoke test sequence for armed restore placeholder
+1. Minimize WhatsApp.
+2. Enable blur. The overlay should not appear yet; this is armed state.
+3. Click WhatsApp in the taskbar to restore.
+4. Watch the moment WhatsApp appears: an opaque dark rectangle should appear
+   over WhatsApp's window region instantly, before any WhatsApp pixels are
+   visible. Within about 1 second the rectangle should become a live blurred
+   view.
+5. At no point during step 4 should WhatsApp content be readable.
+
+**Verification:** Debug solution build passed with 0 warnings/errors. Core tests
+passed (33/33), including new occlusion transition and overlay-self-exclusion
+tests. Focused App test execution still hangs after discovery in this shell via
+`dotnet vstest`, matching the pre-existing App testhost blocker from prior
+sessions.
+
+---
+
+**v0.1.0 final privacy blockers: active-resize frame-pool recreation and armed-state placeholder cover.**
+
+Issue A was traced to the Windows Graphics Capture layer. `BlurPipeline`
+already reallocates its Win2D render target when frame dimensions change, and
+`D3DImageBridge` already calls `SetBackBuffer` for every presented frame. The
+missing piece was `Direct3D11CaptureFramePool.Recreate(...)`: `CaptureEngine`
+now logs every incoming WGC frame `ContentSize`, detects content-size changes,
+recreates the frame pool at the new size, and drops the transition frame so a
+new-size render target is not fed by an old-size pool surface. A regression test
+covers the recreate-and-drop behavior.
+
+Issue B is covered by an explicit opaque overlay placeholder. `OverlayWindow`
+now has a charcoal placeholder layer that stays visible until the first frame is
+presented. `TrayOrchestrator` shows that placeholder and applies current bounds
+before starting capture, so armed-state restore does not expose raw WhatsApp
+content during WGC startup. During active resize, if overlay bounds outgrow the
+last blurred frame, the placeholder is shown until the resized frame arrives.
+
+### Fixed
+- **Maximize during active blur:** `CaptureEngine` recreates the WGC frame pool
+  when frame `ContentSize` changes and logs every incoming WGC content size for
+  smoke-test diagnosis.
+- **Armed-state restore privacy gap:** overlay startup now uses an opaque
+  placeholder before capture begins and hides it after the first presented blur
+  frame.
+
+**Verification:** Debug solution build passed with 0 warnings/errors. Core tests
+passed (29/29), including the new `CaptureEngine` frame-pool recreation test.
+The App testhost still hangs after discovery in this shell, including with a
+`TrayOrchestratorTests` filter; this matches the pre-existing App testhost
+blocker noted in prior sessions.
+
+---
+
+**v0.1.0 final blocker fixes: native overlay resizing and stale-frame restore privacy.**
+
+`OverlayWindow.ApplyBounds` now keeps the WPF window properties in sync but also
+positions the HWND with `SetWindowPos`. This bypasses the transparent,
+borderless WPF window sizing path that can fail to visually honor large
+maximized or screen-edge bounds even when `Window.Left/Top/Width/Height` are
+assigned. `ApplyBounds` now logs actual overlay, grid, and image size after
+every bounds application, so future smoke-test logs show whether requested
+bounds became real layout.
+
+Restore-from-minimize no longer tears down capture. When WhatsApp minimizes,
+the overlay hides but the capture session and last blurred `D3DImage` content
+stay alive. When WhatsApp restores, the orchestrator shows the overlay
+immediately and logs `OverlayWindow.Show called with last frame age = X ms`
+before waiting for any new WGC frame, so the user sees stale blur instead of
+raw WhatsApp content during slow WinUI/WebView2 repaint.
+
+### Fixed
+- **Maximized overlay resize:** overlay placement now uses native
+  `SetWindowPos` after WPF property assignment, with tests covering large
+  maximized-style bounds and negative extended-frame coordinates.
+- **Persistent overlay size diagnostics:** every `ApplyBounds` call schedules
+  an actual-size log for the WPF window, grid, and image.
+- **Restore-from-minimize privacy gap:** minimize hides the overlay without
+  stopping capture; restore shows the overlay immediately using the last
+  blurred frame and logs the stale-frame age.
+
+**Verification:** Debug solution build passed with 0 warnings/errors. New
+`WindowBoundsApplierTests` passed (2/2). Full Core tests are still blocked in
+this shell by the pre-existing Windows Graphics Capture service COMException.
+The broader App testhost still hangs after discovery outside the isolated
+overlay test filter. Release build was blocked because a running `WAshed.App`
+process held the Release output `WAshed.Overlay.dll` open.
+
+---
+
+**v0.1.0 smoke-test fixes: maximize tracking, drag lag, and armed blur activation.**
+
+`WindowTracker` now polls at 33ms (~30 Hz) instead of 100ms, so fast title-bar drags should no longer visibly outrun the overlay. Its bounds path now distinguishes normal window rectangles from maximized rectangles: normal windows still report the raw visual window bounds converted from physical pixels to WPF DIPs, while maximized windows are normalized to the current monitor work area before DPI conversion. This clips Windows' invisible maximized frame extension (for example `-8,-8` / monitor+8 raw `GetWindowRect` values) and keeps multi-monitor per-monitor-DPI behavior intact.
+
+`TrayOrchestrator` now uses an explicit blur activation state machine:
+
+- `Idle`: blur is disabled.
+- `Armed`: blur is enabled but waiting for a visible, non-minimized WhatsApp window. No overlay is shown and capture is not started.
+- `Active`: capture is running and the overlay is shown/following bounds.
+
+Enabling blur while WhatsApp is missing or minimized now enters `Armed` silently. Tracker polling continues, and the orchestrator transitions to `Active` when WhatsApp appears/restores with valid bounds. At the time of that session, closing or minimizing WhatsApp while blur was active stopped capture and returned to `Armed`; the final blocker fix above changed minimize specifically to keep capture alive while the overlay is hidden. This replaces the previous implicit "retry on BoundsChanged" path.
+
+### Fixed
+- **Maximize overlay position:** `WindowTracker` normalizes maximized `GetWindowRect` output to `MonitorFromWindow`/`GetMonitorInfo.rcWork` before converting to WPF DIPs, preventing the overlay from staying offset by the invisible extended frame.
+- **Drag lag:** default `WindowTracker` polling interval reduced from 100ms to 33ms.
+- **Arming while minimized/not running:** `TrayOrchestrator.EnableBlur` no longer starts capture or shows overlay unless the tracker reports WhatsApp present, non-minimized, and with current bounds.
+
+### Added
+- **Window presence tracking:** `IWindowTracker.WindowPresenceChanged`, `IsWindowPresent`, and `IsMinimized` let orchestration react to WhatsApp close/reopen and minimized/restore transitions explicitly.
+- **State-machine tests:** added tests for `Idle -> Armed -> Active`, `Idle -> Active`, and `Active -> Armed -> Active`.
+- **Coordinate-normalization tests:** added maximized bounds normalization coverage at 100%, 125%, and 150% DPI, including negative-coordinate monitor layouts.
+
+**Build:** `dotnet build WAshed.sln --no-restore -v:minimal -maxcpucount:1` passed with 0 warnings/errors. `WindowTracking` tests passed (12/12). Full `dotnet test` is currently blocked in this shell by pre-existing environment issues: Windows Graphics Capture tests throw `COMException: The specified service does not exist as an installed service`, and the App testhost hangs before entering even a pure state-machine test. See notes below.
+
+---
+
+**WindowTracker/TrayOrchestrator hardening after overlay smoke diagnostics.**
+
+`WindowTracker` events are raised from its polling thread, but `TrayOrchestrator` was touching the WPF overlay directly from those callbacks. Bounds updates and minimize/restore overlay operations are now marshalled to `Application.Current.Dispatcher`; the handlers still log immediately on the originating polling thread, and shutdown races where `Application.Current` is null or the dispatcher is shutting down are logged and dropped.
+
+The tracker also now logs bounds changes with throttling instead of logging only the first change. This keeps drag diagnostics visible (`#1`, `#10`, `#20`, ...) without flooding `washed-startup.log`.
+
+Finally, the DPI path was corrected. The app manifest is `PerMonitorV2`, so `GetWindowRect` returns physical pixels. Because `OverlayWindow.SetBounds` assigns WPF `Window.Left/Top/Width/Height`, `WindowTracker` converts physical pixels to WPF DIPs by dividing by `GetDpiForWindow(hwnd) / 96.0`; the previous multiply path double-scaled high-DPI displays.
+
+### Fixed
+- **`TrayOrchestrator`** now dispatches `OnBoundsChanged` and `OnMinimizedChanged` UI work via the WPF dispatcher before calling `IOverlayWindow.SetBounds`, `Hide`, or `Show`.
+- **`WindowTracker`** replaced the one-shot `_firstBoundsChangeLogged` guard with throttled bounds-change logging every 10 changes.
+- **`WindowTracker`** now returns WPF DIP bounds from physical `GetWindowRect` pixels by dividing by the HWND DPI scale.
+- Updated the 150% DPI unit test to catch double-scaling regressions.
+- Updated `app.manifest` comments to document the PerMonitorV2 physical-pixel-to-WPF-DIP contract.
+
+**61 tests green (38 WAshed.App.Tests + 23 WAshed.Core.Tests).**
 
 ---
 
@@ -180,7 +454,7 @@ Previous session: Shipped the two remaining pieces blocking the first end-to-end
 
 ## Next up
 
-**Run the smoke test and read the resulting diagnostic log.** Keep WhatsApp captured for at least 40 seconds, then inspect `washed-startup.log` for `FrameArrived #N`, `PresentFrame #N`, `[bridge call #N]`, and `OverlayWindow.Show: visual tree = ...` lines to determine where frames 2 through N are lost.
+**Final smoke test; if armed-restore is clean, tag v0.1.0 and start Gausslite rename.**
 
 ## Blockers
 
@@ -191,6 +465,13 @@ None.
 (See `PLAN.md` Decisions Log for the full history.)
 
 - **OverlayWindow Image element must use `Stretch=Fill` and stretch alignments**; default Image layout produces a 0x0 element which prevents `D3DImage` from ever being painted, even though `D3DImage.PixelWidth/Height` are correct.
+- **Eager armed setup:** blur setup starts as soon as the current WhatsApp HWND is known, even if WhatsApp is minimized or occluded. Restore/unocclude is only a `SetWindowPos` move of the already-created overlay HWND.
+- **Overlay HWND parking uses offscreen-but-visible coordinates, not `Visibility=Hidden`.** `Visibility=Hidden` was tried and moved heavy setup off the privacy path, but WPF still deferred first layout/paint and caused a roughly 250ms first-show cost. The overlay now stays WPF-visible at `(-32000, -32000)` while armed and moves to WhatsApp bounds when active.
+- **Partial-occlusion hide-all behavior accepted for v0.1.0; pixel-region clipping deferred to v0.2.0 alongside region-aware blur.**
+- **WindowTracker emits WPF DIP bounds, not physical pixels.** In a `PerMonitorV2` process, `GetWindowRect` returns physical pixels; since `OverlayWindow.SetBounds` writes WPF `Window.Left/Top/Width/Height`, the tracker divides by `GetDpiForWindow(hwnd) / 96.0` before raising `BoundsChanged`.
+- **Maximized WindowTracker bounds are normalized before DIP conversion.** Windows can report invisible extended-frame coordinates for maximized windows; the tracker clips maximized rectangles to the monitor work area first, then applies the HWND DPI scale. This keeps overlay bounds aligned with what the user visually sees as the WhatsApp window.
+- **Armed blur state is silent for v0.1.0.** If blur is enabled while WhatsApp is missing or minimized, the app waits without showing overlay/capture. User-facing notification is deferred to v0.4.0 settings and should remain optional, silent by default.
+- **OverlayWindow must return `HTTRANSPARENT` for `WM_NCHITTEST`** so title-bar drag and other non-client frame operations pass through to WhatsApp while blur is enabled. `WS_EX_TRANSPARENT` alone is insufficient for non-client hit-testing; WPF otherwise reports the overlay as an `HTCLIENT` surface.
 - **OverlayWindow sizing must be applied via cached bounds replayed at `SourceInitialized` and after `Show()` because the HWND does not exist when the first tracker bounds can arrive, not just Width/Height property setters before Show.**
 - **WhatsApp detection strategy** = match by process name prefix `"WhatsApp"` (case-insensitive) OR window class `"WinUIDesktopWin32WindowClass"` + title contains `"WhatsApp"`, explicitly excluding `msedgewebview2`. Real diagnostic data showed the Store version is now a WinUI 3 app (`WhatsApp.Root` process) with a WebView2 child, not a classic UWP app. The `ApplicationFrameWindow` strategy is dead and removed.
 - **Tray library = Hardcodet.NotifyIcon.Wpf** (not H.NotifyIcon.Wpf). Rationale: H.NotifyIcon silently failed to register the icon with the Windows shell notification area on at least one tested machine despite all setup steps succeeding (file on disk, BitmapImage loaded, Icon property set, Visibility forced to Visible — all logged clean). Hardcodet's library is the more mature parent project (H.NotifyIcon is a fork of it) and is known to work reliably across Windows versions.
