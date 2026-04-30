@@ -6,6 +6,104 @@
 
 ## Session history
 
+### 2026-04-30 — IAppProfile abstraction (v0.2.0 refactor)
+
+**Goal:** Pure refactor. Extract WhatsApp-specific window-detection knowledge
+from generic infrastructure and place it behind a new `IAppProfile` interface.
+`WhatsAppProfile` becomes the first (and currently only) concrete implementation.
+Zero user-visible behavior change.
+
+**What moved and where:**
+
+- **New:** `src/Gausslite.Core/AppProfiles/IAppProfile.cs` — interface with
+  three members: `string Name`, `bool IsAppWindow(processName, className, title)`,
+  `IntPtr FindWindowHandle()`. Namespace `Gausslite.Core.AppProfiles`.
+
+- **New:** `src/Gausslite.Core/AppProfiles/WhatsAppProfile.cs` — takes `IWin32Api`
+  in its constructor. `IsAppWindow` contains the predicate logic previously split
+  between `Win32Api.IsWhatsAppWindow` (authoritative) and
+  `CaptureItemFactory.IsWhatsAppWindow` (a delegate that called the former).
+  `FindWindowHandle` calls `_win32.FindWindowHandle(IsAppWindow)`.
+
+- **`IWin32Api`:** `FindWhatsAppWindowHandle()` removed, replaced by
+  `FindWindowHandle(Func<string,string,string,bool> predicate)` — generic
+  window-enumeration helper that calls the supplied predicate per window.
+
+- **`Win32Api`:** `FindWhatsAppWindowHandle()` renamed/genericized to
+  `FindWindowHandle(predicate)`. `IsWhatsAppWindow` static method removed.
+
+- **`WindowTracker`:** Constructor gains `IAppProfile profile` parameter (before
+  the optional `pollInterval`). `SampleWindowState()` calls
+  `_profile.FindWindowHandle()` instead of `_win32.FindWhatsAppWindowHandle()`.
+  Log strings at "WhatsApp window detected", "minimized changed to False because
+  WhatsApp", "WhatsApp not found after 5 seconds" all replaced with
+  `_profile.Name` interpolations.
+
+- **`CaptureItemFactory`:** Refactored to take `IAppProfile profile` (no longer
+  needs `IWin32Api` — that field was assigned but unused; the class did its own
+  P/Invoke enumeration). `TryCreateForWhatsApp` → `TryCreateForProfile`.
+  `FindWhatsAppWindow` private method → `FindProfileWindow` (instance method,
+  uses `_profile.IsAppWindow()`). `IsWhatsAppWindow` internal static removed.
+  `ReasonFor` helper simplified (can no longer inspect predicate internals).
+  The diagnostic per-window enumeration loop is preserved.
+
+- **`ICaptureItemFactory`:** `TryCreateForWhatsApp` → `TryCreateForProfile`.
+
+- **`TrayOrchestrator`:** Both constructors gain `IAppProfile profile` parameter.
+  Log strings at "waiting for WhatsApp HWND" and "restore arrived while WhatsApp
+  is still occluded" replaced with `_profile.Name` interpolations. Log strings
+  that mentioned `TryCreateForWhatsApp` by method name naturally genericized by
+  the rename.
+
+- **`App.xaml.cs`:** Composition root creates `IAppProfile appProfile = new
+  WhatsAppProfile(new Win32Api())` and passes it to `WindowTracker`,
+  `CaptureItemFactory`, and `TrayOrchestrator`. A second `new Win32Api()` is
+  passed directly to `WindowTracker` for its non-profile Win32 calls (GetWindowRect
+  etc.) — two instances, both stateless, no concern.
+
+**Tests:**
+
+- **New:** `tests/Gausslite.Core.Tests/AppProfiles/WhatsAppProfileTests.cs` —
+  18 `IsAppWindow` theory cases (moved verbatim from `CaptureItemFactoryTests`),
+  plus `Name_ReturnsWhatsApp` and `FindWindowHandle_DelegatesToWin32`.
+
+- **`WindowTrackerTests`:** `IAppProfile _profile = Substitute.For<IAppProfile>()` added.
+  `CreateTracker()` passes `_profile`. All `_win32.FindWhatsAppWindowHandle()`
+  mock setups replaced with `_profile.FindWindowHandle()`.
+
+- **`WindowTrackerMinimizedTests`:** Same pattern — `_profile` mock added,
+  constructor call updated, `FindWhatsAppWindowHandle` mock → `FindWindowHandle`.
+
+- **`CaptureItemFactoryTests`:** Rewritten. The 18 predicate theory cases removed
+  (moved to `WhatsAppProfileTests`). Two integration tests renamed and updated to
+  construct `new CaptureItemFactory(new WhatsAppProfile(new Win32Api()))`.
+
+- **`TrayOrchestratorTests`:** `IAppProfile _profile = Substitute.For<IAppProfile>()`
+  added. Both `CreateSut()` / `CreateSutWithInlineDispatch()` pass `_profile`.
+  All `TryCreateForWhatsApp` call sites renamed to `TryCreateForProfile`.
+
+**Final test counts:** Core 53/53, App 36/36 (x64). Before: Core 33, App 54.
+The 18 predicate tests moved from App.Tests to Core.Tests; 2 new tests added in
+Core.Tests for `Name` and `FindWindowHandle`. Net: +2 tests across the solution.
+
+**Non-obvious design decisions:**
+
+1. `IWin32Api` got the generic `FindWindowHandle(predicate)` method rather than
+   putting P/Invoke directly in `WhatsAppProfile`. This keeps all Win32 enumeration
+   behind the interface seam, making `WhatsAppProfile.FindWindowHandle()` testable
+   by mocking `IWin32Api`.
+
+2. `CaptureItemFactory` keeps its own window enumeration (not delegating to
+   `_profile.FindWindowHandle()`) because it has a detailed diagnostic per-window
+   logging loop that runs only on the first call. Delegating to the profile would
+   lose that logging; the task required log strings to stay at the same call sites.
+
+3. `TrayOrchestrator` receives `IAppProfile` even though it has no window-detection
+   logic, solely to genericize two log strings. This is the minimal change that
+   removes the hardcoded "WhatsApp" references from it.
+
+---
+
 ### 2026-04-30 — v0.1.1 rename + post-rename documentation pass
 
 The project was renamed from internal codename "WAshed" to "Gausslite"

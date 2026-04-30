@@ -1,5 +1,6 @@
 using NSubstitute;
 using System.Windows;
+using Gausslite.Core.AppProfiles;
 using Gausslite.Core.WindowTracking;
 
 namespace Gausslite.Core.Tests.WindowTracking;
@@ -7,18 +8,19 @@ namespace Gausslite.Core.Tests.WindowTracking;
 public sealed class WindowTrackerTests : IDisposable
 {
     private readonly IWin32Api _win32 = Substitute.For<IWin32Api>();
+    private readonly IAppProfile _profile = Substitute.For<IAppProfile>();
     private readonly List<Rect> _receivedBounds = new();
     private WindowTracker? _tracker;
 
     private WindowTracker CreateTracker() =>
-        new WindowTracker(_win32, TimeSpan.FromMilliseconds(10));
+        new WindowTracker(_win32, _profile, TimeSpan.FromMilliseconds(10));
 
     private void NoHandle() =>
-        _win32.FindWhatsAppWindowHandle().Returns(IntPtr.Zero);
+        _profile.FindWindowHandle().Returns(IntPtr.Zero);
 
     private void SetupHandleAndRect(IntPtr hwnd, RECT rect, uint dpi = 96)
     {
-        _win32.FindWhatsAppWindowHandle().Returns(hwnd);
+        _profile.FindWindowHandle().Returns(hwnd);
         RECT dummy = default;
         _win32.GetWindowRect(Arg.Any<IntPtr>(), out dummy)
               .Returns(x => { x[1] = rect; return true; });
@@ -61,7 +63,7 @@ public sealed class WindowTrackerTests : IDisposable
     public async Task BoundsChanged_Raised_WhenBoundsChange()
     {
         var hwnd = new IntPtr(42);
-        _win32.FindWhatsAppWindowHandle().Returns(hwnd);
+        _profile.FindWindowHandle().Returns(hwnd);
         _win32.GetDpiForWindow(hwnd).Returns(96u);
 
         var rect1 = new RECT { Left = 0, Top = 0, Right = 100, Bottom = 100 };
@@ -252,7 +254,7 @@ public sealed class WindowTrackerTests : IDisposable
     public async Task Stop_HaltsPolling_NoFurtherEventsFireAfterStop()
     {
         var hwnd = new IntPtr(55);
-        _win32.FindWhatsAppWindowHandle().Returns(hwnd);
+        _profile.FindWindowHandle().Returns(hwnd);
         _win32.GetDpiForWindow(hwnd).Returns(96u);
 
         RECT currentRect = new RECT { Left = 0, Top = 0, Right = 100, Bottom = 100 };

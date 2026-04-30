@@ -7,6 +7,7 @@ using Gausslite.App.Diagnostics;
 using Gausslite.App.Hotkey;
 using Gausslite.App.Orchestration;
 using Gausslite.App.Tray;
+using Gausslite.Core.AppProfiles;
 using Gausslite.Core.Blur;
 using Gausslite.Core.Capture;
 using Gausslite.Core.WindowTracking;
@@ -46,7 +47,9 @@ public partial class App : Application
         // can be fed directly into Win2D drawing sessions without a cross-device copy.
         IDirect3DDevice d3dDevice = CreateD3D11Device();
 
-        IWindowTracker windowTracker = new WindowTracker(new Win32Api());
+        IAppProfile appProfile = new WhatsAppProfile(new Win32Api());
+
+        IWindowTracker windowTracker = new WindowTracker(new Win32Api(), appProfile);
 
         var captureInterop = new WinRTCaptureInterop();
         ICaptureEngine captureEngine = new CaptureEngine(captureInterop, d3dDevice);
@@ -56,7 +59,7 @@ public partial class App : Application
         blurPipeline.Initialize(d3dDevice);
 
         IOverlayWindow overlayWindow = new OverlayWindow();
-        ICaptureItemFactory captureItemFactory = new CaptureItemFactory(new Win32Api());
+        ICaptureItemFactory captureItemFactory = new CaptureItemFactory(appProfile);
 
         _hotkeyService = new HotkeyService();
 
@@ -69,7 +72,8 @@ public partial class App : Application
                 blurPipeline,
                 overlayWindow,
                 _hotkeyService,
-                captureItemFactory);
+                captureItemFactory,
+                appProfile);
             StartupLog.Info("TrayOrchestrator constructed.");
         }
         catch (Exception ex)

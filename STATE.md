@@ -12,40 +12,39 @@ definition and CHANGELOG.md for full v0.1.x development history.
 
 ## Last session summary
 
-**2026-04-30 — v0.1.1 rename + post-rename documentation pass.** The
-project was renamed from "WAshed" to "Gausslite" (single capital G,
-portmanteau of Gaussian + gaslighting). Single Codex pass covered the
-solution, projects, namespaces, folders, assembly names, executable
-name, log file names, in-code references, and forward-looking docs.
-Project GUIDs preserved. CHANGELOG historical entries kept verbatim.
-Build clean, Core 33/33, App 54/54 (x64), `git grep -in washed`
-returns only CHANGELOG matches. Tray icon asset updated post-rename.
-v0.1.1 tagged on main with no functional changes.
+**2026-04-30 — IAppProfile abstraction (v0.2.0 refactor item).** Extracted
+all WhatsApp-specific window-detection knowledge behind a new `IAppProfile`
+interface (`src/Gausslite.Core/AppProfiles/`). `WhatsAppProfile` is the
+first concrete implementation: it owns the `IsAppWindow` predicate and
+`FindWindowHandle` (via a new generic `IWin32Api.FindWindowHandle(predicate)`
+method). `Win32Api.IsWhatsAppWindow` and `FindWhatsAppWindowHandle` are gone;
+the predicate logic lives only in `WhatsAppProfile`.
 
-The session also did a documentation pass: PLAN.md milestones
-restructured (v0.3.0 redefined as "Knows when to blur," v0.5.0 added
-for toast notification blur, v0.2.0 expanded with IAppProfile +
-pixel-region occlusion clipping + runtime-configurable blur intensity,
-multi-app support removed from v0.x roadmap as IDD-before-breadth);
-README rewritten with Gausslite framing; GitHub repo renamed and made
-private through v0.x.
+`WindowTracker`, `CaptureItemFactory`, and `TrayOrchestrator` now receive
+`IAppProfile` by constructor injection. `ICaptureItemFactory.TryCreateForWhatsApp`
+renamed to `TryCreateForProfile`. `App.xaml.cs` is the sole place that
+constructs `WhatsAppProfile`. All WhatsApp-hardcoded log strings replaced with
+`_profile.Name` interpolations. Predicate unit tests moved from
+`CaptureItemFactoryTests` to a new `WhatsAppProfileTests` in Core.Tests.
+Build: 0 warnings, 0 errors. Tests: Core 53/53, App 36/36 (x64).
+(Core +20 from WhatsAppProfileTests; App -18 because the 18 predicate theory
+cases moved to Core.)
 
 Full session archive in HISTORY.md.
 
 ## Next up
 
-**v0.2.0 — "The right regions"** in a fresh session. See PLAN.md for
-the full milestone definition. Recommend starting v0.2.0 only after
-the Claude Max subscription is in place — region detection is
-multi-session work that benefits from longer back-and-forth than
-short rate-limited sessions allow.
+**v0.2.0 — "The right regions"** remaining items. `IAppProfile` is done.
+Recommended next: runtime-configurable blur radius + tray intensity submenu
+(Light/Medium/Heavy presets) as a self-contained pair — both are in
+`BlurPipeline` and `TrayOrchestrator` and can ship together in one session.
 
-v0.2.0 work, no required order between items:
+v0.2.0 remaining work (no required order):
 
 - RegionDetector module: UIA (UI Automation) primary with a
   computer-vision fallback, returning chat-list and conversation
-  rects in WhatsApp's window coordinate space. This is the headline
-  feature of the milestone and the largest single piece of work
+  rects in WhatsApp's window coordinate space. Headline feature;
+  largest single piece of work. Will extend `IAppProfile` when it lands.
 - Pixel-region occlusion clipping (replaces v0.1.0 center-point
   hide-all behavior when WhatsApp is partially behind another window)
 - Runtime-configurable blur radius in BlurPipeline (currently
@@ -54,8 +53,6 @@ v0.2.0 work, no required order between items:
   exposing the runtime-configurable radius via the tray)
 - Tray menu region scope submenu ("Blur chat list" / "Blur
   conversation" / "Blur both")
-- IAppProfile abstraction extracted from current WhatsApp-specific
-  code paths
 - Smoke test on 3 different WhatsApp Desktop layouts (default, narrow, wide)
 
 ## Blockers
@@ -65,6 +62,21 @@ None. v0.1.1 is shipped clean. v0.2.0 is unblocked.
 ## Recent decisions
 
 (See `PLAN.md` Decisions Log for the full history.)
+
+- **`IWin32Api.FindWindowHandle(predicate)` is the generic window-finder.**
+  `WhatsAppProfile.FindWindowHandle()` calls it with `IsAppWindow` as the
+  predicate. `WindowTracker` calls `_profile.FindWindowHandle()`. This keeps
+  all P/Invoke enumeration in `Win32Api` while keeping app-specific criteria
+  in `WhatsAppProfile`.
+
+- **`CaptureItemFactory` keeps its own diagnostic enumeration loop.** It uses
+  `_profile.IsAppWindow()` inside its existing per-window logging loop rather
+  than delegating to `_profile.FindWindowHandle()`, preserving detailed
+  per-window log lines during capture-item creation.
+
+- **`TrayOrchestrator` also receives `IAppProfile`** for the two log strings
+  ("armed - waiting for {Name} HWND", "restore arrived while {Name} is still
+  occluded") that previously hardcoded "WhatsApp".
 
 Decisions carrying forward from v0.1.0 development that future v0.2.0+
 work should keep in mind:

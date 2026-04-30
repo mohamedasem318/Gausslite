@@ -2,6 +2,7 @@ using NSubstitute;
 using System.Windows;
 using Gausslite.App.Hotkey;
 using Gausslite.App.Orchestration;
+using Gausslite.Core.AppProfiles;
 using Gausslite.Core.Blur;
 using Gausslite.Core.Capture;
 using Gausslite.Core.WindowTracking;
@@ -18,6 +19,7 @@ public sealed class TrayOrchestratorTests
     private readonly IOverlayWindow _overlayWindow = Substitute.For<IOverlayWindow>();
     private readonly IHotkeyService _hotkeyService = Substitute.For<IHotkeyService>();
     private readonly ICaptureItemFactory _captureItemFactory = Substitute.For<ICaptureItemFactory>();
+    private readonly IAppProfile _profile = Substitute.For<IAppProfile>();
 
     private TrayOrchestrator CreateSut() => new(
         _windowTracker,
@@ -25,7 +27,8 @@ public sealed class TrayOrchestratorTests
         _blurPipeline,
         _overlayWindow,
         _hotkeyService,
-        _captureItemFactory);
+        _captureItemFactory,
+        _profile);
 
     private TrayOrchestrator CreateSutWithInlineDispatch() => new(
         _windowTracker,
@@ -34,6 +37,7 @@ public sealed class TrayOrchestratorTests
         _overlayWindow,
         _hotkeyService,
         _captureItemFactory,
+        _profile,
         (_, action, _) => action(),
         (_, action) => action());
 
@@ -50,7 +54,7 @@ public sealed class TrayOrchestratorTests
 
         GraphicsCaptureItem? dummy = null;
         _captureItemFactory
-            .TryCreateForWhatsApp(out dummy)
+            .TryCreateForProfile(out dummy)
             .Returns(x => { x[0] = null!; return true; });
     }
 
@@ -63,7 +67,7 @@ public sealed class TrayOrchestratorTests
 
         GraphicsCaptureItem? dummy = null;
         _captureItemFactory
-            .TryCreateForWhatsApp(out dummy)
+            .TryCreateForProfile(out dummy)
             .Returns(x => { x[0] = null!; return false; });
     }
 
@@ -76,7 +80,7 @@ public sealed class TrayOrchestratorTests
 
         GraphicsCaptureItem? dummy = null;
         _captureItemFactory
-            .TryCreateForWhatsApp(out dummy)
+            .TryCreateForProfile(out dummy)
             .Returns(x => { x[0] = null!; return true; });
     }
 
@@ -235,7 +239,7 @@ public sealed class TrayOrchestratorTests
         Assert.Equal(BlurActivationState.Armed, sut.ActivationState);
         _windowTracker.Received(1).Start();
         GraphicsCaptureItem? ignored;
-        _captureItemFactory.Received(1).TryCreateForWhatsApp(out ignored);
+        _captureItemFactory.Received(1).TryCreateForProfile(out ignored);
         _captureEngine.Received(1).Start(Arg.Any<GraphicsCaptureItem>());
         _overlayWindow.Received(1).ShowOffscreen(Arg.Any<Rect>());
         _overlayWindow.DidNotReceive().MoveToBounds(Arg.Any<Rect>());
@@ -292,7 +296,7 @@ public sealed class TrayOrchestratorTests
         _windowTracker.WindowPresenceChanged += Raise.Event<EventHandler<bool>>(this, true);
 
         GraphicsCaptureItem? ignored;
-        _captureItemFactory.Received(1).TryCreateForWhatsApp(out ignored);
+        _captureItemFactory.Received(1).TryCreateForProfile(out ignored);
         _captureEngine.Received(1).Start(Arg.Any<GraphicsCaptureItem>());
         _overlayWindow.Received(1).ShowOffscreen(Arg.Any<Rect>());
         _overlayWindow.DidNotReceive().MoveToBounds(Arg.Any<Rect>());
@@ -375,7 +379,7 @@ public sealed class TrayOrchestratorTests
         _windowTracker.MinimizedChanged += Raise.Event<EventHandler<bool>>(this, false);
 
         GraphicsCaptureItem? ignored;
-        _captureItemFactory.DidNotReceive().TryCreateForWhatsApp(out ignored);
+        _captureItemFactory.DidNotReceive().TryCreateForProfile(out ignored);
         _captureEngine.DidNotReceive().Start(Arg.Any<GraphicsCaptureItem>());
         _overlayWindow.Received(1).MoveToBounds(new Rect(0, 0, 800, 600));
         Assert.Equal(BlurActivationState.Active, sut.ActivationState);
