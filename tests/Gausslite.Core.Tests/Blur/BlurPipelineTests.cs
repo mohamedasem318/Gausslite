@@ -63,6 +63,12 @@ public sealed class BlurPipelineTests
     }
 
     [Fact]
+    public void BlurRadius_Default_IsMediumPreset()
+    {
+        Assert.Equal(BlurIntensityPresets.MediumRadius, BlurPipeline.DefaultBlurRadius);
+    }
+
+    [Fact]
     public void BlurRadius_CanBeSetAndRetrieved()
     {
         var pipeline = CreatePipeline();

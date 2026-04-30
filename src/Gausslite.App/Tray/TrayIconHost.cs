@@ -6,6 +6,7 @@ using System.Windows.Media.Imaging;
 using Hardcodet.Wpf.TaskbarNotification;
 using Gausslite.App.Diagnostics;
 using Gausslite.App.Orchestration;
+using Gausslite.Core.Blur;
 
 namespace Gausslite.App.Tray;
 
@@ -19,6 +20,9 @@ internal sealed class TrayIconHost : IDisposable
     private readonly ITrayOrchestrator _orchestrator;
     private TaskbarIcon? _taskbarIcon;
     private MenuItem? _toggleItem;
+    private MenuItem? _intensityLightItem;
+    private MenuItem? _intensityMediumItem;
+    private MenuItem? _intensityHeavyItem;
 
     public TrayIconHost(ITrayOrchestrator orchestrator) => _orchestrator = orchestrator;
 
@@ -79,11 +83,21 @@ internal sealed class TrayIconHost : IDisposable
         };
         _toggleItem.Click += (_, _) => _orchestrator.ToggleBlur();
 
+        var intensitySubmenu = new MenuItem { Header = "Blur intensity" };
+        _intensityLightItem  = CreateIntensityItem("Light",  BlurIntensityPreset.Light);
+        _intensityMediumItem = CreateIntensityItem("Medium", BlurIntensityPreset.Medium);
+        _intensityHeavyItem  = CreateIntensityItem("Heavy",  BlurIntensityPreset.Heavy);
+        intensitySubmenu.Items.Add(_intensityLightItem);
+        intensitySubmenu.Items.Add(_intensityMediumItem);
+        intensitySubmenu.Items.Add(_intensityHeavyItem);
+        UpdateIntensityCheckmarks(_orchestrator.CurrentIntensity);
+
         var exitItem = new MenuItem { Header = "Exit" };
         exitItem.Click += (_, _) => Application.Current.Shutdown();
 
         var menu = new ContextMenu();
         menu.Items.Add(_toggleItem);
+        menu.Items.Add(intensitySubmenu);
         menu.Items.Add(new Separator());
         menu.Items.Add(exitItem);
         _taskbarIcon.ContextMenu = menu;
@@ -96,6 +110,24 @@ internal sealed class TrayIconHost : IDisposable
     {
         if (_toggleItem is not null)
             _toggleItem.IsChecked = isEnabled;
+    }
+
+    private MenuItem CreateIntensityItem(string header, BlurIntensityPreset preset)
+    {
+        var item = new MenuItem { Header = header, IsCheckable = true };
+        item.Click += (_, _) =>
+        {
+            _orchestrator.SetIntensity(preset);
+            UpdateIntensityCheckmarks(preset);
+        };
+        return item;
+    }
+
+    private void UpdateIntensityCheckmarks(BlurIntensityPreset selected)
+    {
+        if (_intensityLightItem is not null)  _intensityLightItem.IsChecked  = selected == BlurIntensityPreset.Light;
+        if (_intensityMediumItem is not null) _intensityMediumItem.IsChecked = selected == BlurIntensityPreset.Medium;
+        if (_intensityHeavyItem is not null)  _intensityHeavyItem.IsChecked  = selected == BlurIntensityPreset.Heavy;
     }
 
     public void Dispose()
