@@ -1,11 +1,11 @@
-# WAshed — Project Plan
+# Gausslite — Project Plan
 
 > **For Claude Code:** Read this file at the start of every session, alongside
 > `STATE.md`. This file changes rarely. `STATE.md` changes every session.
 
 ## Vision
 
-WAshed automatically blurs WhatsApp chat content when the user is sharing
+Gausslite automatically blurs WhatsApp chat content when the user is sharing
 their screen, so private messages aren't accidentally broadcast in meetings.
 
 The product targets a real gap: existing solutions are browser extensions
@@ -53,15 +53,15 @@ hypothetical macOS port (parked, see Non-goals) can swap implementations.
 
 | Module                                    | Lang  | Purpose                                                    |
 | ----------------------------------------- | ----- | ---------------------------------------------------------- |
-| `WAshed.Core/WindowTracking`              | C#    | Find & track WA Desktop window, DPI-aware bounds           |
-| `WAshed.Core/Capture`                     | C#    | Wraps Windows.Graphics.Capture, exposes per-frame textures |
-| `WAshed.Core/Blur`                        | C#    | Win2D blur pipeline, region masking                        |
-| `WAshed.Core/Detection`                   | C#    | Find chat list & conversation rects (UIA primary, CV fallback) |
-| `WAshed.Core/ScreenShare`                 | C#    | Process-based detection of capture clients                 |
-| `WAshed.Overlay`                          | C#    | Transparent always-on-top window, D3DImage host            |
-| `WAshed.App`                              | C#    | WPF tray app, settings, hotkey, orchestration              |
-| `WAshed.Driver` *(v1)*                    | C++   | IDD driver, framebuffer pipe to user-mode app              |
-| `WAshed.Compositor` *(v1)*                | C#    | Composites desktop + selective blur for phantom monitor    |
+| `Gausslite.Core/WindowTracking`              | C#    | Find & track WA Desktop window, DPI-aware bounds           |
+| `Gausslite.Core/Capture`                     | C#    | Wraps Windows.Graphics.Capture, exposes per-frame textures |
+| `Gausslite.Core/Blur`                        | C#    | Win2D blur pipeline, region masking                        |
+| `Gausslite.Core/Detection`                   | C#    | Find chat list & conversation rects (UIA primary, CV fallback) |
+| `Gausslite.Core/ScreenShare`                 | C#    | Process-based detection of capture clients                 |
+| `Gausslite.Overlay`                          | C#    | Transparent always-on-top window, D3DImage host            |
+| `Gausslite.App`                              | C#    | WPF tray app, settings, hotkey, orchestration              |
+| `Gausslite.Driver` *(v1)*                    | C++   | IDD driver, framebuffer pipe to user-mode app              |
+| `Gausslite.Compositor` *(v1)*                | C#    | Composites desktop + selective blur for phantom monitor    |
 
 Each `Core` module is testable through interface seams (`IWin32Api`,
 `IUIAutomation`, `IProcessEnumerator`). UI/GPU code is not unit-tested;
@@ -113,7 +113,7 @@ covered by manual smoke tests.
   different UX.
 - **Cloud sync, account system, telemetry.** None. Local-only.
 - **WhatsApp Web in this repo.** A Chrome extension is planned in a
-  separate repo (WAshed-Web) post-v0.
+  separate repo (Gausslite-Web) post-v0.
 
 ## Open questions
 
@@ -143,6 +143,9 @@ Append-only. One line per decision with date and rationale.
 - 2026-04-29: OverlayWindow Image element must use Stretch=Fill and stretch
   alignments; default Image layout produces 0x0 element which prevents D3DImage
   from ever being painted, even though D3DImage.PixelWidth/Height are correct.
+- 2026-04-30: Renamed project to Gausslite. Single capital G. Rationale:
+  portmanteau of Gaussian + gaslighting, cleaner branding, drops the
+  descriptive WhatsApp prefix.
 
 ## Per-session checklist
 

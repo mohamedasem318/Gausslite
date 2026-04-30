@@ -1,8 +1,8 @@
-# WAshed
+# Gausslite
 
 **Blur your WhatsApp chats automatically when you're sharing your screen.**
 
-Stop accidentally exposing private messages in screen-shared meetings. WAshed
+Stop accidentally exposing private messages in screen-shared meetings. Gausslite
 detects when you're sharing your screen and applies a real GPU blur to
 WhatsApp chat regions — automatically, no hotkey required.
 
@@ -53,7 +53,7 @@ A separate Chrome extension for WhatsApp Web is planned post-v0 in its own repo.
 ## Installation
 
 Download the latest installer from
-[Releases](https://github.com/mohamedasem318/WAshed/releases).
+[Releases](https://github.com/mohamedasem318/Gausslite/releases).
 
 ## Building from source
 
@@ -61,7 +61,7 @@ See [docs/building.md](docs/building.md).
 
 ## License
 
-WAshed is licensed under the [GNU Affero General Public License v3.0](LICENSE).
+Gausslite is licensed under the [GNU Affero General Public License v3.0](LICENSE).
 
 This means you are free to use, modify, and distribute this software, but
 any modified version — including those run as a network service — must be
@@ -69,27 +69,26 @@ released under the same license with source code available to its users.
 
 ## Citation
 
-If you use WAshed in your work or build on top of it, an acknowledgment is
+If you use Gausslite in your work or build on top of it, an acknowledgment is
 appreciated but not legally required beyond what AGPL-3.0 mandates:
 
-> Assem, M. (2026). *WAshed: Automatic chat blur for screen sharing.*
-> https://github.com/mohamedasem318/WAshed
+> Assem, M. (2026). *Gausslite: Automatic chat blur for screen sharing.*
+> https://github.com/mohamedasem318/Gausslite
 
 ## Disclaimer
 
-WAshed is an independent open-source project and is **not affiliated with,
+Gausslite is an independent open-source project and is **not affiliated with,
 endorsed by, sponsored by, or connected to WhatsApp LLC, Meta Platforms, Inc.,
 or any of their subsidiaries**. "WhatsApp" is a trademark of WhatsApp LLC.
-WAshed does not modify, repackage, or interfere with the WhatsApp application
+Gausslite does not modify, repackage, or interfere with the WhatsApp application
 itself; it operates as a separate privacy utility that processes the visual
 output of windows on the user's own desktop. References to "WhatsApp" in this
 project's code, documentation, and user interface exist solely to identify the
 target application for the user's privacy convenience.
 
-The "WA" in the project name "WAshed" is used in a descriptive sense to
-indicate compatibility with WhatsApp Desktop and does not imply official
-endorsement. Users of this software bear sole responsibility for compliance
-with WhatsApp's Terms of Service in their own usage.
+The name "Gausslite" is a portmanteau of "Gaussian" (the blur) and
+"gaslighting", referring to the experience of accidentally exposing private
+chats to viewers. It is unrelated to WhatsApp branding.
 
 This software is provided "as is", without warranty of any kind. The author
 assumes no liability for any consequences arising from the use of this
