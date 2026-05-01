@@ -1,4 +1,5 @@
 using Gausslite.Core.Capture;
+using Gausslite.Core.Diagnostics;
 using Windows.Graphics.DirectX.Direct3D11;
 
 namespace Gausslite.Core.Blur;
@@ -12,7 +13,13 @@ public sealed class BlurPipeline : IBlurPipeline
     private bool _initialized;
     private bool _disposed;
     private IBlurCanvasDevice? _canvasDevice;
+
+    // _renderTarget and _cachedInputFrame are always the same pixel dimensions.
+    // Both are guarded by _cacheLock: written from the capture thread (BlurFrame),
+    // read from the UI thread (TryRenderCurrentFrame).
     private IBlurRenderTarget? _renderTarget;
+    private ICachedFrame? _cachedInputFrame;
+    private readonly object _cacheLock = new();
 
     // volatile: written from UI thread (preset change), read from frame-processing thread.
     private volatile float _blurRadius = DefaultBlurRadius;
@@ -38,23 +45,54 @@ public sealed class BlurPipeline : IBlurPipeline
 
         var (width, height) = _interop.GetFrameSize(frame);
 
-        if (_renderTarget is null || _renderTarget.Width != width || _renderTarget.Height != height)
+        lock (_cacheLock)
         {
-            _renderTarget?.Dispose();
-            _renderTarget = _interop.CreateRenderTarget(_canvasDevice!, width, height);
-        }
+            if (_renderTarget is null || _renderTarget.Width != width || _renderTarget.Height != height)
+            {
+                _renderTarget?.Dispose();
+                _renderTarget = _interop.CreateRenderTarget(_canvasDevice!, width, height);
+                // Reallocate the input cache alongside the render target (same dimension invariant).
+                _cachedInputFrame?.Dispose();
+                _cachedInputFrame = _interop.CreateCachedFrame(_canvasDevice!, width, height);
+            }
 
-        _interop.DrawBlur(_canvasDevice!, _renderTarget, frame, BlurRadius);
-        return _renderTarget;
+            _interop.DrawBlur(_canvasDevice!, _renderTarget!, frame, BlurRadius);
+            _interop.UpdateCachedFrame(_canvasDevice!, _cachedInputFrame!, frame);
+
+            return _renderTarget!;
+        }
+    }
+
+    public IBlurRenderTarget? TryRenderCurrentFrame()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        lock (_cacheLock)
+        {
+            if (_cachedInputFrame is null || _renderTarget is null)
+            {
+                DiagLog.Info("TryRenderCurrentFrame: no cached frame yet; returning null");
+                return null;
+            }
+
+            DiagLog.Info($"TryRenderCurrentFrame: re-rendering {_renderTarget.Width}x{_renderTarget.Height} at radius={BlurRadius:F1} DIPs");
+            _interop.DrawBlurFromCache(_canvasDevice!, _renderTarget, _cachedInputFrame, BlurRadius);
+            return _renderTarget;
+        }
     }
 
     public void Dispose()
     {
         if (_disposed) return;
         _disposed = true;
-        _renderTarget?.Dispose();
+        lock (_cacheLock)
+        {
+            _renderTarget?.Dispose();
+            _cachedInputFrame?.Dispose();
+            _renderTarget = null;
+            _cachedInputFrame = null;
+        }
         _canvasDevice?.Dispose();
-        _renderTarget = null;
         _canvasDevice = null;
     }
 }

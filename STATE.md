@@ -12,31 +12,43 @@ definition and CHANGELOG.md for full v0.1.x development history.
 
 ## Last session summary
 
-**2026-04-30 — Runtime-configurable blur radius + tray intensity submenu (v0.2.0).** Added
-`BlurIntensityPreset` enum (`Light`, `Medium`, `Heavy`) and `BlurIntensityPresets` static
-class with `LightRadius = 10f`, `MediumRadius = 20f`, `HeavyRadius = 35f` and a
-`ToRadius(preset)` helper — all in `Gausslite.Core/Blur/BlurIntensityPreset.cs`.
-`BlurPipeline.DefaultBlurRadius` now derives from `BlurIntensityPresets.MediumRadius` rather
-than a freestanding literal; `BlurRadius` backing field is `volatile float` for correct
-cross-thread visibility (UI thread writes, frame-processing thread reads).
+**2026-05-01 (multi-session) — Blur intensity feature shipped; idle-window on-demand repaint unresolved.**
 
-`ITrayOrchestrator` gained `BlurIntensityPreset CurrentIntensity { get; }` and
-`SetIntensity(BlurIntensityPreset)`. `TrayOrchestrator` implements both: `SetIntensity`
-maps the preset to a radius via `BlurIntensityPresets.ToRadius` and writes it directly to
-`_blurPipeline.BlurRadius` so the next frame picks it up without a blur off/on cycle.
-Default is `Medium`. `TrayIconHost` gained a "Blur intensity" submenu with three
-radio-button-style checkable items wired to `ITrayOrchestrator.SetIntensity`.
+Shipped the blur intensity preset feature: `BlurIntensityPreset` enum (Light / Medium /
+Heavy), tray menu "Blur intensity" submenu with checkmark tracking, runtime-configurable
+`BlurPipeline.BlurRadius` (`volatile float` backing field), and an input-frame cache
+(`ICachedFrame` / `Win2DCachedFrame`) that lets `TryRenderCurrentFrame()` re-render at
+the new radius without waiting for a new WGC frame. Diagnostic logging added across the
+full re-render path (`SetIntensity`, `TryRenderCurrentFrame`, `UpdateD3DImage`,
+`PresentFrame`).
 
-Build: 0 warnings, 0 errors. Tests: Core 59/59, App 40/40 (x64).
-(Core +6: 3 `BlurIntensityPresetTests` + 1 `BlurRadius_Default_IsMediumPreset` +
- 2 theory cases already counted; App +4 from four new `SetIntensity` orchestrator tests.)
+`D3DImage.AddDirtyRect(full rect)` (between `SetBackBuffer`/`Unlock`) and
+`Image.InvalidateVisual()` (after `Unlock`) are both in place and improve repaint
+reliability for the natural 60fps capture path.
 
-Full session archive in HISTORY.md.
+**What didn't ship:** switching presets while WhatsApp is fully idle has no immediate
+visual effect. The on-demand re-render chain executes successfully (confirmed in logs),
+but the overlay does not visually update until cursor movement over WhatsApp triggers a
+new WGC frame. Multiple sessions investigated this residual bug; a stale-exe build path
+issue caused several false negatives along the way. Compositor scheduling was confirmed
+healthy (first `CompositionTarget.Rendering` fires within 10 ms of `InvalidateVisual`).
+Root cause of DWM not presenting new pixels during idle periods is not fully understood.
+Shipped as a known issue; deferred to v1.0 IDD architecture or future investigation.
+
+Test counts: Core 62/62, App 42/42 (x64). Build: 1 pre-existing Win2D warning, 0 errors.
 
 ## Next up
 
-**v0.2.0 — "The right regions"** remaining items. `IAppProfile` and blur-intensity
-submenu are done.
+**v0.2.0 — "The right regions"** remaining items. `IAppProfile`, blur-intensity presets,
+and the AddDirtyRect + InvalidateVisual repaint improvements are done. Known issue:
+idle-window preset repaint deferred (see Last session summary).
+
+Pick one for the next session:
+- **Pixel-region occlusion clipping** — blur only the visible portion of WhatsApp when
+  it is partially behind another window; replaces the v0.1.0 center-point hide-all
+  behavior. No dependency on RegionDetector.
+- **Tray menu region scope submenu** ("Blur chat list" / "Blur conversation" / "Blur
+  both") — scaffold can land now; becomes functional when RegionDetector lands.
 
 v0.2.0 remaining work (no required order):
 
@@ -57,6 +69,12 @@ None. v0.1.1 is shipped clean. v0.2.0 is unblocked.
 ## Recent decisions
 
 (See `PLAN.md` Decisions Log for the full history.)
+
+- **Blur pipeline retains a copy of the most recent input frame for on-demand re-render.**
+  `BlurPipeline` allocates a `ICachedFrame` (Win2D `CanvasRenderTarget`, no D3D9Ex shared
+  flag needed) alongside the render target. `TryRenderCurrentFrame()` re-renders from this
+  cache at the current radius. Region-scope and similar future blur-parameter changes will
+  call `TryRenderCurrentFrame` the same way.
 
 - **`BlurIntensityPresets` is the single source of truth for preset numeric values.**
   `BlurPipeline.DefaultBlurRadius` derives from `BlurIntensityPresets.MediumRadius`

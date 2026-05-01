@@ -136,4 +136,53 @@ public sealed class BlurPipelineTests
 
         Assert.Null(ex);
     }
+
+    [Fact]
+    public void TryRenderCurrentFrame_BeforeAnyFrame_ReturnsNull()
+    {
+        var pipeline = CreatePipeline();
+        pipeline.Initialize(_device);
+
+        var result = pipeline.TryRenderCurrentFrame();
+
+        Assert.Null(result);
+        _interop.DidNotReceive().DrawBlurFromCache(
+            Arg.Any<IBlurCanvasDevice>(), Arg.Any<IBlurRenderTarget>(), Arg.Any<ICachedFrame>(), Arg.Any<float>());
+    }
+
+    [Fact]
+    public void TryRenderCurrentFrame_AfterFrame_DrawsFromCacheAtCurrentRadius()
+    {
+        var rt = MakeRenderTarget(100, 100);
+        _interop.CreateRenderTarget(Arg.Any<IBlurCanvasDevice>(), 100f, 100f).Returns(rt);
+        var cachedFrame = Substitute.For<ICachedFrame>();
+        cachedFrame.Width.Returns(100f);
+        cachedFrame.Height.Returns(100f);
+        _interop.CreateCachedFrame(Arg.Any<IBlurCanvasDevice>(), 100f, 100f).Returns(cachedFrame);
+        var pipeline = CreatePipeline();
+        pipeline.Initialize(_device);
+        pipeline.BlurFrame(MakeFrame(100, 100));
+
+        pipeline.BlurRadius = 42.5f;
+        var result = pipeline.TryRenderCurrentFrame();
+
+        Assert.NotNull(result);
+        _interop.Received(1).DrawBlurFromCache(
+            Arg.Any<IBlurCanvasDevice>(), rt, cachedFrame, 42.5f);
+    }
+
+    [Fact]
+    public void TryRenderCurrentFrame_AfterFrame_ReturnsRenderTarget()
+    {
+        var rt = MakeRenderTarget(100, 100);
+        _interop.CreateRenderTarget(Arg.Any<IBlurCanvasDevice>(), 100f, 100f).Returns(rt);
+        _interop.CreateCachedFrame(Arg.Any<IBlurCanvasDevice>(), 100f, 100f).Returns(Substitute.For<ICachedFrame>());
+        var pipeline = CreatePipeline();
+        pipeline.Initialize(_device);
+        pipeline.BlurFrame(MakeFrame(100, 100));
+
+        var result = pipeline.TryRenderCurrentFrame();
+
+        Assert.Same(rt, result);
+    }
 }
