@@ -480,4 +480,31 @@ public sealed class TrayOrchestratorTests
         _blurPipeline.Received(1).BlurRadius = BlurIntensityPresets.HeavyRadius;
         Assert.Equal(BlurIntensityPreset.Heavy, sut.CurrentIntensity);
     }
+
+    [Fact]
+    public void SetIntensity_CallsTryRenderCurrentFrame_AndPresentsWhenCachedFrameAvailable()
+    {
+        SetupWhatsAppNotRunning();
+        var renderTarget = Substitute.For<IBlurRenderTarget>();
+        _blurPipeline.TryRenderCurrentFrame().Returns(renderTarget);
+        using var sut = CreateSut();
+
+        sut.SetIntensity(BlurIntensityPreset.Light);
+
+        _blurPipeline.Received(1).TryRenderCurrentFrame();
+        _overlayWindow.Received(1).PresentFrame(renderTarget);
+    }
+
+    [Fact]
+    public void SetIntensity_DoesNotPresentFrame_WhenNoCachedFrameAvailable()
+    {
+        SetupWhatsAppNotRunning();
+        _blurPipeline.TryRenderCurrentFrame().Returns((IBlurRenderTarget?)null);
+        using var sut = CreateSut();
+
+        sut.SetIntensity(BlurIntensityPreset.Light);
+
+        _blurPipeline.Received(1).TryRenderCurrentFrame();
+        _overlayWindow.DidNotReceive().PresentFrame(Arg.Any<IBlurRenderTarget>());
+    }
 }

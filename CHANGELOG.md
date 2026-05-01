@@ -8,17 +8,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Tray menu: "Blur intensity" submenu with Light (10 DIPs), Medium (20 DIPs), and
-  Heavy (35 DIPs) presets. Checkmark tracks the current selection. Switching preset
-  takes effect on the next captured frame with no blur off/on cycle required.
-  Default is Medium, matching the previous hardcoded behavior.
+- Blur intensity presets: `BlurIntensityPreset` enum (Light / Medium / Heavy) with a
+  new tray menu "Blur intensity" submenu; default is Medium (20 DIPs), preserving the
+  previous hardcoded behavior. `BlurPipeline.BlurRadius` is now runtime-configurable;
+  a cached input frame (`ICachedFrame`) enables on-demand re-render when the preset
+  changes.
 
 ### Changed
-- Updated tray icon to match new Gausslite branding.
 - Internal refactor: WhatsApp-specific window-detection knowledge extracted behind
   a new `IAppProfile` interface (`WhatsAppProfile` is the first implementation),
   separating app identity from the generic blur infrastructure in preparation for
   region-aware blur.
+
+### Fixed
+- `D3DImage.AddDirtyRect` (full rect, between `SetBackBuffer` and `Unlock`) and
+  `Image.InvalidateVisual` (after `Unlock`) are now called on every present, improving
+  repaint reliability for the natural 60fps capture path.
+
+### Known Issues
+- Switching blur intensity presets has no immediate visible effect when WhatsApp is
+  fully idle (Windows Graphics Capture only delivers frames when the source window's
+  content changes). Moving the cursor over WhatsApp triggers a new frame and applies
+  the new radius. Likely resolved by the v1.0 IDD architecture, where the compositor
+  renders continuously regardless of source-window activity.
 
 ## [0.1.1] - 2026-04-30
 

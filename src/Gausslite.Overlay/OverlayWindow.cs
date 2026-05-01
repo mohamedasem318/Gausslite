@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
@@ -46,6 +47,11 @@ public sealed class OverlayWindow : IOverlayWindow
     private int _presentFrameCount;
     private int _presentExceptionCount;
     private int _visualTreeLogged;
+
+    // CompositionTarget.Rendering diagnostics — all accessed on UI thread only.
+    private EventHandler? _compositionRenderingHandler;
+    private int _compositionRenderingFiringsLeft;
+    private const int MaxRenderingFirings = 5;
 
     public IntPtr WindowHandle => new WindowInteropHelper(_window).Handle;
 
@@ -270,20 +276,46 @@ public sealed class OverlayWindow : IOverlayWindow
     public void PresentFrame(IBlurRenderTarget target)
     {
         int frameNumber = Interlocked.Increment(ref _presentFrameCount);
-        bool shouldLog = frameNumber <= 5 || frameNumber % 30 == 0;
+
+        // CheckAccess() is true only when PresentFrame is called from the WPF UI thread,
+        // which happens exclusively on the SetIntensity on-demand re-render path. Natural
+        // capture frames always arrive from a background thread (CheckAccess() == false).
+        bool isOnDemand = _window.Dispatcher.CheckAccess();
+        bool shouldLog = frameNumber <= 5 || frameNumber % 30 == 0 || isOnDemand;
 
         // D3DImage.Lock/SetBackBuffer/Unlock must run on the UI thread.
         try
         {
             _window.Dispatcher.Invoke(() =>
             {
+                long invokeEnteredAt = Stopwatch.GetTimestamp();
+
                 if (shouldLog)
                 {
-                    DiagLog.Info($"PresentFrame #{frameNumber}: dims={target.Width}x{target.Height}");
+                    string kind = isOnDemand ? "ON-DEMAND" : "capture";
+                    DiagLog.Info($"PresentFrame #{frameNumber} [{kind}]: dims={target.Width}x{target.Height}");
                     DiagLog.Info($"PresentFrame #{frameNumber}: D3DImage.IsFrontBufferAvailable={_d3dImage.IsFrontBufferAvailable}, PixelWidth={_d3dImage.PixelWidth}, PixelHeight={_d3dImage.PixelHeight}");
+                    DiagLog.Info($"PresentFrame #{frameNumber}: Image.ActualSize={_image.ActualWidth:0.#}x{_image.ActualHeight:0.#}, IsMeasureValid={_image.IsMeasureValid}, IsArrangeValid={_image.IsArrangeValid}");
+                    DiagLog.Info($"PresentFrame #{frameNumber}: Window.ActualSize={_window.ActualWidth:0.#}x{_window.ActualHeight:0.#}, IsVisible={_window.IsVisible}");
                 }
 
                 _bridge.UpdateD3DImage(_d3dImage, target);
+
+                // Without an explicit InvalidateVisual, WPF's render thread only picks up
+                // the D3DImage dirty region at its next scheduled pass. For the natural
+                // capture path (60fps) that pass is always pending, so the update appears
+                // within one VBlank. For on-demand re-renders triggered between capture
+                // frames, no render pass is scheduled and the new pixels would sit invisible
+                // until the next natural frame arrives (~1 second). InvalidateVisual
+                // schedules a render pass at DispatcherPriority.Render so any caller —
+                // including the tray-menu intensity preset path — gets an immediate repaint.
+                _image.InvalidateVisual();
+                if (shouldLog)
+                    DiagLog.Info($"PresentFrame #{frameNumber}: InvalidateVisual called on Image element");
+
+                if (isOnDemand)
+                    SubscribeCompositionRendering(frameNumber, invokeEnteredAt);
+
                 if (_placeholder.Visibility != Visibility.Collapsed)
                 {
                     _placeholder.Visibility = Visibility.Collapsed;
@@ -298,6 +330,39 @@ public sealed class OverlayWindow : IOverlayWindow
             DiagLog.Warn($"PresentFrame #{frameNumber}: stack: {ex.StackTrace}");
             // Do NOT re-throw — one bad frame must not crash the app.
         }
+    }
+
+    // Called from inside Dispatcher.Invoke on the UI thread. Hooks CompositionTarget.Rendering
+    // and logs the first MaxRenderingFirings ticks after an on-demand InvalidateVisual so we
+    // can measure how long the WPF compositor takes to schedule the render pass.
+    private void SubscribeCompositionRendering(int frameNumber, long baseTimestamp)
+    {
+        if (_compositionRenderingHandler is not null)
+        {
+            CompositionTarget.Rendering -= _compositionRenderingHandler;
+            _compositionRenderingHandler = null;
+            DiagLog.Info($"PresentFrame #{frameNumber}: replaced previous CompositionTarget.Rendering subscription");
+        }
+
+        _compositionRenderingFiringsLeft = MaxRenderingFirings;
+
+        _compositionRenderingHandler = (_, _) =>
+        {
+            int left = --_compositionRenderingFiringsLeft;
+            int firingNumber = MaxRenderingFirings - left;
+            double elapsed = (Stopwatch.GetTimestamp() - baseTimestamp) * 1000.0 / Stopwatch.Frequency;
+            DiagLog.Info($"CompositionTarget.Rendering #{firingNumber} (after ON-DEMAND frame #{frameNumber}): {elapsed:F3} ms since InvalidateVisual");
+
+            if (left <= 0)
+            {
+                CompositionTarget.Rendering -= _compositionRenderingHandler;
+                _compositionRenderingHandler = null;
+                DiagLog.Info($"CompositionTarget.Rendering: unsubscribed after {MaxRenderingFirings} firings");
+            }
+        };
+
+        CompositionTarget.Rendering += _compositionRenderingHandler;
+        DiagLog.Info($"PresentFrame #{frameNumber}: CompositionTarget.Rendering subscribed — will log next {MaxRenderingFirings} firings");
     }
 
     private string DescribeVisualTree()

@@ -22,4 +22,16 @@ public interface IBlurInterop
 
     /// <summary>Returns the pixel dimensions of the captured surface in <paramref name="frame"/>.</summary>
     (float Width, float Height) GetFrameSize(ICaptureFrame frame);
+
+    /// <summary>Allocates a persistent GPU texture to hold a cached copy of a captured frame.</summary>
+    ICachedFrame CreateCachedFrame(IBlurCanvasDevice canvasDevice, float width, float height);
+
+    /// <summary>Copies the pixels of <paramref name="frame"/> into <paramref name="cachedFrame"/>.</summary>
+    void UpdateCachedFrame(IBlurCanvasDevice canvasDevice, ICachedFrame cachedFrame, ICaptureFrame frame);
+
+    /// <summary>
+    /// Draws <paramref name="cachedFrame"/> to <paramref name="renderTarget"/> through a
+    /// <c>GaussianBlurEffect</c> with the given <paramref name="radius"/> in DIPs.
+    /// </summary>
+    void DrawBlurFromCache(IBlurCanvasDevice canvasDevice, IBlurRenderTarget renderTarget, ICachedFrame cachedFrame, float radius);
 }

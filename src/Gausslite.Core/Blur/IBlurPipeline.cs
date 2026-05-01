@@ -19,4 +19,12 @@ public interface IBlurPipeline : IDisposable
 
     /// <summary>Gaussian blur radius in DIPs. Configurable at runtime.</summary>
     float BlurRadius { get; set; }
+
+    /// <summary>
+    /// Re-renders the most recently cached input frame at the current <see cref="BlurRadius"/>.
+    /// Returns the render target if a cached frame was available; returns <see langword="null"/> if
+    /// no frame has been captured yet (the next real frame will use the new radius automatically).
+    /// The caller must present the result immediately and not retain it past the next <see cref="BlurFrame"/> call.
+    /// </summary>
+    IBlurRenderTarget? TryRenderCurrentFrame();
 }
