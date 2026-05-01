@@ -31,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   content changes). Moving the cursor over WhatsApp triggers a new frame and applies
   the new radius. Likely resolved by the v1.0 IDD architecture, where the compositor
   renders continuously regardless of source-window activity.
+  https://github.com/mohamedasem318/Gausslite/issues/23
 
 ## [0.1.1] - 2026-04-30
 
