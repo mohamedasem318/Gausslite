@@ -23,6 +23,9 @@ internal sealed class TrayIconHost : IDisposable
     private MenuItem? _intensityLightItem;
     private MenuItem? _intensityMediumItem;
     private MenuItem? _intensityHeavyItem;
+    private MenuItem? _scopeChatListItem;
+    private MenuItem? _scopeConversationItem;
+    private MenuItem? _scopeBothItem;
 
     public TrayIconHost(ITrayOrchestrator orchestrator) => _orchestrator = orchestrator;
 
@@ -92,12 +95,22 @@ internal sealed class TrayIconHost : IDisposable
         intensitySubmenu.Items.Add(_intensityHeavyItem);
         UpdateIntensityCheckmarks(_orchestrator.CurrentIntensity);
 
+        var scopeSubmenu = new MenuItem { Header = "Blur region" };
+        _scopeChatListItem     = CreateScopeItem("Chat list",    BlurRegionScope.ChatList);
+        _scopeConversationItem = CreateScopeItem("Conversation", BlurRegionScope.Conversation);
+        _scopeBothItem         = CreateScopeItem("Both",         BlurRegionScope.Both);
+        scopeSubmenu.Items.Add(_scopeChatListItem);
+        scopeSubmenu.Items.Add(_scopeConversationItem);
+        scopeSubmenu.Items.Add(_scopeBothItem);
+        UpdateScopeCheckmarks(_orchestrator.CurrentScope);
+
         var exitItem = new MenuItem { Header = "Exit" };
         exitItem.Click += (_, _) => Application.Current.Shutdown();
 
         var menu = new ContextMenu();
         menu.Items.Add(_toggleItem);
         menu.Items.Add(intensitySubmenu);
+        menu.Items.Add(scopeSubmenu);
         menu.Items.Add(new Separator());
         menu.Items.Add(exitItem);
         _taskbarIcon.ContextMenu = menu;
@@ -128,6 +141,24 @@ internal sealed class TrayIconHost : IDisposable
         if (_intensityLightItem is not null)  _intensityLightItem.IsChecked  = selected == BlurIntensityPreset.Light;
         if (_intensityMediumItem is not null) _intensityMediumItem.IsChecked = selected == BlurIntensityPreset.Medium;
         if (_intensityHeavyItem is not null)  _intensityHeavyItem.IsChecked  = selected == BlurIntensityPreset.Heavy;
+    }
+
+    private MenuItem CreateScopeItem(string header, BlurRegionScope scope)
+    {
+        var item = new MenuItem { Header = header, IsCheckable = true };
+        item.Click += (_, _) =>
+        {
+            _orchestrator.SetScope(scope);
+            UpdateScopeCheckmarks(scope);
+        };
+        return item;
+    }
+
+    private void UpdateScopeCheckmarks(BlurRegionScope selected)
+    {
+        if (_scopeChatListItem is not null)     _scopeChatListItem.IsChecked     = selected == BlurRegionScope.ChatList;
+        if (_scopeConversationItem is not null) _scopeConversationItem.IsChecked = selected == BlurRegionScope.Conversation;
+        if (_scopeBothItem is not null)         _scopeBothItem.IsChecked         = selected == BlurRegionScope.Both;
     }
 
     public void Dispose()

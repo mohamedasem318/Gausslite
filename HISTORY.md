@@ -6,6 +6,22 @@
 
 ## Session history
 
+### 2026-05-01 — Tray menu region scope submenu (UI scaffold)
+
+**What shipped.** `BlurRegionScope` enum (`ChatList`, `Conversation`, `Both`) added to
+`Gausslite.Core/Blur/` alongside `BlurIntensityPreset`. `ITrayOrchestrator` gains
+`CurrentScope` (get) and `SetScope(BlurRegionScope)`. `TrayOrchestrator` implements both:
+`CurrentScope` defaults to `Both`, `SetScope` stores the value and logs; no pipeline
+interaction (the scope is a no-op until RegionDetector lands). `TrayIconHost` adds a
+"Blur region" submenu with "Chat list", "Conversation", and "Both" items, following the
+exact same pattern as the existing "Blur intensity" submenu (checkmark tracking, click
+handler). Four new `TrayOrchestratorTests` cover default scope and all three `SetScope`
+transitions; no `BlurPipeline` mock expectations since the pipeline is not touched.
+
+Test counts: Core 62/62, App 46/46 (x64). Build: 0 warnings, 0 errors.
+
+---
+
 ### 2026-05-01 — Blur intensity on-demand repaint investigation (multi-session arc)
 
 **What shipped.** The blur intensity preset feature is complete: `BlurIntensityPreset`

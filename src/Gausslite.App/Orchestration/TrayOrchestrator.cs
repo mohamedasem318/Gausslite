@@ -54,6 +54,7 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
 
     public bool IsBlurEnabled => _activation.State != BlurActivationState.Idle;
     public BlurIntensityPreset CurrentIntensity { get; private set; } = BlurIntensityPreset.Medium;
+    public BlurRegionScope CurrentScope { get; private set; } = BlurRegionScope.Both;
     internal BlurActivationState ActivationState => _activation.State;
 
     public TrayOrchestrator(
@@ -123,6 +124,12 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
         {
             StartupLog.Info("SetIntensity: no cached frame yet; new radius will apply on next WGC frame");
         }
+    }
+
+    public void SetScope(BlurRegionScope scope)
+    {
+        StartupLog.Info($"SetScope: scope={scope}");
+        CurrentScope = scope;
     }
 
     public void EnableBlur()

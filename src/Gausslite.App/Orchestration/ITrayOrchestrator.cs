@@ -9,9 +9,11 @@ public interface ITrayOrchestrator : IDisposable
 
     bool IsBlurEnabled { get; }
     BlurIntensityPreset CurrentIntensity { get; }
+    BlurRegionScope CurrentScope { get; }
 
     void ToggleBlur();
     void EnableBlur();
     void DisableBlur();
     void SetIntensity(BlurIntensityPreset preset);
+    void SetScope(BlurRegionScope scope);
 }

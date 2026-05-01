@@ -12,43 +12,25 @@ definition and CHANGELOG.md for full v0.1.x development history.
 
 ## Last session summary
 
-**2026-05-01 (multi-session) — Blur intensity feature shipped; idle-window on-demand repaint unresolved.**
+**2026-05-01 — Tray menu region scope submenu (UI scaffold).**
 
-Shipped the blur intensity preset feature: `BlurIntensityPreset` enum (Light / Medium /
-Heavy), tray menu "Blur intensity" submenu with checkmark tracking, runtime-configurable
-`BlurPipeline.BlurRadius` (`volatile float` backing field), and an input-frame cache
-(`ICachedFrame` / `Win2DCachedFrame`) that lets `TryRenderCurrentFrame()` re-render at
-the new radius without waiting for a new WGC frame. Diagnostic logging added across the
-full re-render path (`SetIntensity`, `TryRenderCurrentFrame`, `UpdateD3DImage`,
-`PresentFrame`).
+Added `BlurRegionScope` enum (`ChatList`, `Conversation`, `Both`) to `Gausslite.Core/Blur/`.
+`ITrayOrchestrator` and `TrayOrchestrator` gain `CurrentScope` (defaults to `Both`) and
+`SetScope(BlurRegionScope)` — stored in the orchestrator, no pipeline interaction (scope
+is a no-op until RegionDetector lands). `TrayIconHost` adds a "Blur region" submenu
+following the same pattern as "Blur intensity": three checkable items with checkmark
+tracking and a click handler calling `SetScope`. Four new `TrayOrchestratorTests` cover
+default scope and all three transitions.
 
-`D3DImage.AddDirtyRect(full rect)` (between `SetBackBuffer`/`Unlock`) and
-`Image.InvalidateVisual()` (after `Unlock`) are both in place and improve repaint
-reliability for the natural 60fps capture path.
-
-**What didn't ship:** switching presets while WhatsApp is fully idle has no immediate
-visual effect. The on-demand re-render chain executes successfully (confirmed in logs),
-but the overlay does not visually update until cursor movement over WhatsApp triggers a
-new WGC frame. Multiple sessions investigated this residual bug; a stale-exe build path
-issue caused several false negatives along the way. Compositor scheduling was confirmed
-healthy (first `CompositionTarget.Rendering` fires within 10 ms of `InvalidateVisual`).
-Root cause of DWM not presenting new pixels during idle periods is not fully understood.
-Shipped as a known issue; deferred to v1.0 IDD architecture or future investigation.
-
-Test counts: Core 62/62, App 42/42 (x64). Build: 1 pre-existing Win2D warning, 0 errors.
+Test counts: Core 62/62, App 46/46 (x64). Build: 0 warnings, 0 errors.
 
 ## Next up
 
 **v0.2.0 — "The right regions"** remaining items. `IAppProfile`, blur-intensity presets,
-and the AddDirtyRect + InvalidateVisual repaint improvements are done. Known issue:
-idle-window preset repaint deferred (see Last session summary).
+AddDirtyRect + InvalidateVisual repaint improvements, and the region scope submenu scaffold
+are done.
 
 Pick one for the next session:
-- **Pixel-region occlusion clipping** — blur only the visible portion of WhatsApp when
-  it is partially behind another window; replaces the v0.1.0 center-point hide-all
-  behavior. No dependency on RegionDetector.
-- **Tray menu region scope submenu** ("Blur chat list" / "Blur conversation" / "Blur
-  both") — scaffold can land now; becomes functional when RegionDetector lands.
 
 v0.2.0 remaining work (no required order):
 
