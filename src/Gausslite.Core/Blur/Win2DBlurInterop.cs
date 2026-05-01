@@ -1,7 +1,9 @@
+using System.Runtime.InteropServices;
 using Microsoft.Graphics.Canvas;
 using Microsoft.Graphics.Canvas.Effects;
 using Gausslite.Core.Capture;
 using Windows.Graphics.DirectX.Direct3D11;
+using WinRT;
 
 namespace Gausslite.Core.Blur;
 
@@ -82,11 +84,118 @@ public sealed class Win2DBlurInterop : IBlurInterop
 
         var blurEffect = new GaussianBlurEffect
         {
-            Source = cacheTarget,
+            Source     = cacheTarget,
             BlurAmount = radius,
         };
 
         using var session = rt.CanvasRenderTarget.CreateDrawingSession();
         session.DrawImage(blurEffect);
+    }
+
+    /// <inheritdoc/>
+    public void DrawDiagnosticOverlay(IBlurCanvasDevice canvasDevice, IBlurRenderTarget renderTarget)
+    {
+        var rt = (Win2DBlurRenderTarget)renderTarget;
+        using var session = rt.CanvasRenderTarget.CreateDrawingSession();
+        session.FillRectangle(0, 0, 200, 200, new Windows.UI.Color { A = 255, R = 255, G = 0, B = 0 });
+    }
+
+    /// <inheritdoc/>
+    public void FlushDevice(IBlurCanvasDevice canvasDevice)
+    {
+        var wrapper = (Win2DCanvasDeviceWrapper)canvasDevice;
+        FlushD3D11Context(wrapper.Direct3DDevice);
+    }
+
+    // ── D3D11 context flush ───────────────────────────────────────────────────
+    //
+    // Win2D submits drawing commands to the D3D11 immediate context via D2D1.  On the
+    // on-demand (UI-thread) re-render path every step is synchronous: Win2D writes → the
+    // D3D9Ex bridge opens the same shared texture → WPF composites.  Without an explicit
+    // ID3D11DeviceContext::Flush() the D3D11 UMD driver may still hold pending commands in
+    // its internal CPU-side buffer.  The D3D9Ex reader then sees the pre-render GPU content,
+    // so the displayed blur never changes despite a correct TryRenderCurrentFrame execution.
+    //
+    // Capture frames work by coincidence: the multi-thread dispatch from WGC callback through
+    // Dispatcher.Invoke adds ~0.5 ms latency during which the UMD auto-flushes.
+    //
+    // We resolve this by calling Flush() on the immediate context via raw vtable dispatch,
+    // which avoids defining dozens of placeholder COM interface methods.
+    //
+    // Vtable slot constants (0-based, including IUnknown):
+    //   ID3D11Device::GetImmediateContext  → slot 40
+    //   ID3D11DeviceContext::Flush         → slot 111
+
+    private static readonly Guid IID_IDirect3DDxgiInterfaceAccess =
+        new("A9B3D012-3DF2-4EE3-B8D1-8695F457D3C1");
+
+    private static readonly Guid IID_ID3D11Device =
+        new("db6f6ddb-ac77-4e88-8253-819df9bbf140");
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void GetImmediateContextDelegate(IntPtr pDevice, out IntPtr ppImmediateContext);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void FlushDelegate(IntPtr pContext);
+
+    [ComImport]
+    [Guid("A9B3D012-3DF2-4EE3-B8D1-8695F457D3C1")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IDirect3DDxgiInterfaceAccess
+    {
+        [PreserveSig]
+        int GetInterface(in Guid iid, out IntPtr ppvObject);
+    }
+
+    private static void FlushD3D11Context(IDirect3DDevice d3dDevice)
+    {
+        if (d3dDevice is not IWinRTObject winrtObj || winrtObj.NativeObject is not { } objRef)
+            return;
+
+        IntPtr deviceWrapperPtr = objRef.ThisPtr; // borrowed — do NOT release
+
+        // Step 1: QI the WinRT device wrapper for IDirect3DDxgiInterfaceAccess.
+        var accessGuid = IID_IDirect3DDxgiInterfaceAccess;
+        int hr = Marshal.QueryInterface(deviceWrapperPtr, ref accessGuid, out IntPtr accessPtr);
+        if (hr < 0) return;
+
+        try
+        {
+            // Step 2: Get the underlying ID3D11Device pointer.
+            var access = (IDirect3DDxgiInterfaceAccess)Marshal.GetObjectForIUnknown(accessPtr);
+            hr = access.GetInterface(in IID_ID3D11Device, out IntPtr d3d11DevicePtr);
+            if (hr < 0) return;
+
+            try
+            {
+                // Step 3: Call ID3D11Device::GetImmediateContext via vtable slot 40.
+                IntPtr deviceVtable = Marshal.ReadIntPtr(d3d11DevicePtr);
+                IntPtr getCtxFnPtr  = Marshal.ReadIntPtr(deviceVtable, 40 * IntPtr.Size);
+                var getCtx = Marshal.GetDelegateForFunctionPointer<GetImmediateContextDelegate>(getCtxFnPtr);
+                getCtx(d3d11DevicePtr, out IntPtr contextPtr);
+                if (contextPtr == IntPtr.Zero) return;
+
+                try
+                {
+                    // Step 4: Call ID3D11DeviceContext::Flush via vtable slot 111.
+                    IntPtr ctxVtable = Marshal.ReadIntPtr(contextPtr);
+                    IntPtr flushFnPtr = Marshal.ReadIntPtr(ctxVtable, 111 * IntPtr.Size);
+                    var flush = Marshal.GetDelegateForFunctionPointer<FlushDelegate>(flushFnPtr);
+                    flush(contextPtr);
+                }
+                finally
+                {
+                    Marshal.Release(contextPtr);
+                }
+            }
+            finally
+            {
+                Marshal.Release(d3d11DevicePtr);
+            }
+        }
+        finally
+        {
+            Marshal.Release(accessPtr);
+        }
     }
 }

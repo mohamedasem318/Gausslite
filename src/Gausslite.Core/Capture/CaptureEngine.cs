@@ -54,6 +54,7 @@ public sealed class CaptureEngine : ICaptureEngine, IDisposable
 
         DiagLog.Info("CaptureEngine.Start: starting capture session...");
         _session = _interop.CreateSession(_pool, item!);
+        _session.IsBorderRequired = false;
         _session.StartCapture();
         DiagLog.Info("CaptureEngine.Start: capture session started, returning");
 
