@@ -22,19 +22,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a new `IAppProfile` interface (`WhatsAppProfile` is the first implementation),
   separating app identity from the generic blur infrastructure in preparation for
   region-aware blur.
+- Minimum supported Windows version raised from 10.0.19041 to 10.0.22621 (Windows 11
+  22H2) to access `GraphicsCaptureSession.IsBorderRequired`.
 
 ### Fixed
 - `D3DImage.AddDirtyRect` (full rect, between `SetBackBuffer` and `Unlock`) and
   `Image.InvalidateVisual` (after `Unlock`) are now called on every present, improving
   repaint reliability for the natural 60fps capture path.
+- Blur intensity preset changes (Light / Medium / Heavy) now take effect immediately
+  when WhatsApp is idle and producing no new WGC frames. Root cause: `BlurPipeline
+  .TryRenderCurrentFrame` re-renders on the synchronous UI thread; without an explicit
+  `ID3D11DeviceContext::Flush()`, the D3D11 UMD driver held pending commands in its
+  CPU-side buffer, so D3D9Ex read the shared texture before the GPU saw the new blur.
+  Fixed by calling `Flush()` via vtable dispatch after Win2D drawing sessions complete.
+  https://github.com/mohamedasem318/Gausslite/issues/23
+- Yellow/amber capture-indicator border no longer appears around WhatsApp while blur
+  is active. `GraphicsCaptureSession.IsBorderRequired` is now set to `false` on
+  Windows 11 22H2+ at session start; silently skipped on older OS versions.
 
 ### Known Issues
-- Switching blur intensity presets has no immediate visible effect when WhatsApp is
-  fully idle (Windows Graphics Capture only delivers frames when the source window's
-  content changes). Moving the cursor over WhatsApp triggers a new frame and applies
-  the new radius. Likely resolved by the v1.0 IDD architecture, where the compositor
-  renders continuously regardless of source-window activity.
-  https://github.com/mohamedasem318/Gausslite/issues/23
+- Blur fades at the edges of the WhatsApp window (visible as a gradient fringe on
+  all four sides). Root cause: `GaussianBlurEffect` uses `BorderMode = Soft` (default),
+  which treats out-of-bounds samples as transparent; combined with a 14 × 7 pixel size
+  difference between the WGC content area (1280 × 765) and the overlay window bounds
+  (1294 × 772), the fade zone is visible in the stretched overlay. Fix (padding the
+  source texture before blurring) deferred to a follow-up session.
 
 ## [0.1.1] - 2026-04-30
 

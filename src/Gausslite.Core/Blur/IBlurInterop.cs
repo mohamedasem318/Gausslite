@@ -34,4 +34,18 @@ public interface IBlurInterop
     /// <c>GaussianBlurEffect</c> with the given <paramref name="radius"/> in DIPs.
     /// </summary>
     void DrawBlurFromCache(IBlurCanvasDevice canvasDevice, IBlurRenderTarget renderTarget, ICachedFrame cachedFrame, float radius);
+
+    /// <summary>
+    /// Draws a solid red 200×200 DIP rectangle at the top-left of <paramref name="renderTarget"/>.
+    /// Called only when <c>BlurPipeline.DiagnosticOverlayEnabled</c> is <c>true</c>.
+    /// </summary>
+    void DrawDiagnosticOverlay(IBlurCanvasDevice canvasDevice, IBlurRenderTarget renderTarget);
+
+    /// <summary>
+    /// Flushes pending D3D11 commands to the GPU command queue so that a subsequent D3D9Ex
+    /// read of the shared render-target texture sees the result of the latest Win2D draw.
+    /// Must be called after all Win2D drawing sessions complete on the on-demand (UI-thread)
+    /// re-render path, before <c>D3DImageBridge.UpdateD3DImage</c> accesses the surface.
+    /// </summary>
+    void FlushDevice(IBlurCanvasDevice canvasDevice);
 }

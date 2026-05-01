@@ -77,6 +77,15 @@ public sealed class BlurPipeline : IBlurPipeline
 
             DiagLog.Info($"TryRenderCurrentFrame: re-rendering {_renderTarget.Width}x{_renderTarget.Height} at radius={BlurRadius:F1} DIPs");
             _interop.DrawBlurFromCache(_canvasDevice!, _renderTarget, _cachedInputFrame, BlurRadius);
+
+            // Flush the D3D11 command buffer so the GPU has the new blur content before
+            // D3DImageBridge creates the D3D9Ex shared-surface wrapper on the same texture.
+            // Without this, the synchronous UI-thread re-render path has no scheduling gap
+            // and the UMD may not have submitted its pending draw commands to the GPU queue,
+            // causing D3D9Ex to read stale content and WPF to composite the previous frame.
+            _interop.FlushDevice(_canvasDevice!);
+            DiagLog.Info($"TryRenderCurrentFrame: D3D11 context flushed at radius={BlurRadius:F1} DIPs");
+
             return _renderTarget;
         }
     }

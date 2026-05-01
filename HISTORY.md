@@ -6,6 +6,93 @@
 
 ## Session history
 
+### 2026-05-02 — Idle repaint confirmed + fixed; WGC border suppressed; TFM 22621
+
+**Context.** The blur intensity preset submenu had shipped in a prior session, but
+switching presets while WhatsApp was idle produced no visible change (#23). Multiple
+previous sessions had investigated this and provisionally closed it as a "known issue"
+(WGC only delivers frames on content change). This session re-opened it with a full
+log-based diagnostic.
+
+**Root cause — intensity not visible (Bug A).**
+
+The `TryRenderCurrentFrame` on-demand path runs entirely on the WPF UI thread (no
+dispatcher hop). Win2D submits D3D11/D2D1 commands synchronously, but the D3D11 UMD
+(user-mode driver) is free to batch CPU-side commands before submitting them to the
+GPU command queue. Without an explicit `ID3D11DeviceContext::Flush()` the UMD held
+those commands in its internal buffer. `D3DImageBridge` then created the D3D9Ex
+shared-surface wrapper and handed it to WPF — before the GPU had seen the new blur
+commands. WPF composited the previous frame, silently.
+
+This appeared to work for regular capture frames because the multi-thread dispatch
+from the WGC callback (background thread) through `Dispatcher.Invoke` to the UI
+thread adds ~0.5–1 ms of latency, during which the UMD typically auto-submits.
+
+Diagnostic evidence: `CompositionTarget.Rendering` fired 5 times within ~80 ms of
+`InvalidateVisual`, confirming WPF's compositor was healthy. The diagnostic
+`DiagnosticOverlayEnabled = true` flag (red 200×200 rectangle) had been added in a
+prior session; the user confirmed it was also not visible, ruling out renderer timing
+as the cause and pointing squarely at stale GPU content.
+
+**Fix (Bug A).** Added `IBlurInterop.FlushDevice(IBlurCanvasDevice)` to the interop
+interface. `Win2DBlurInterop.FlushDevice` implements it via raw vtable dispatch:
+1. QI `IDirect3DDxgiInterfaceAccess` from the WinRT device wrapper.
+2. `GetInterface(IID_ID3D11Device)` → vtable slot 40 (`GetImmediateContext`) → get
+   `ID3D11DeviceContext*`.
+3. Vtable slot 111 (`Flush`) on the context pointer.
+`BlurPipeline.TryRenderCurrentFrame` calls `FlushDevice` after all Win2D drawing
+sessions complete, immediately before returning `_renderTarget` for `PresentFrame` to
+bridge into D3D9Ex. The `DiagnosticOverlayEnabled` constant and its dead `if` block
+were removed.
+
+**Root cause — yellow capture border (Bug B).**
+
+`GraphicsCaptureSession.IsBorderRequired` defaults to `true`. Windows 11 draws a
+yellow/amber system border around any window being screen-captured to notify the user.
+The code never set it to `false`.
+
+**Fix (Bug B).** Added `bool IsBorderRequired { set; }` to `ICaptureSession`.
+`WinRTCaptureSession` proxies it to `_session.IsBorderRequired`. `CaptureEngine.Start`
+sets it `false` before `StartCapture`. Because this API requires Windows 11 22H2
+(build 22621), all five `.csproj` files were bumped from `net8.0-windows10.0.19041.0`
+to `net8.0-windows10.0.22621.0`.
+
+**Root cause — washed/faded blur edges (Bug C).**
+
+`GaussianBlurEffect.BorderMode` defaults to `Soft`, which treats out-of-bounds kernel
+samples as transparent. For a 1280 × 765 capture blurred into a 1280 × 765 render
+target, the last ~`BlurRadius` pixels on each side fade to transparent rather than
+showing a naturally blurred edge color. This is then stretched (via `Image.Stretch =
+Fill`) to fill the 1294 × 772 overlay window (the 14 × 7 px size difference comes from
+WindowTracker reporting full HWND bounds while WGC captures only the client content
+area). Result: visible gradient fringe on all four sides of the overlay.
+
+An attempt was made to fix this with `EffectBorderMode.Hard` (clamps/mirrors edge
+pixels into the blur kernel). It eliminated the fade but created a different artifact:
+at heavy blur radii the repeated-pixel clamping made the boundary look visually
+"harder" (crisper/less blurry) than the interior, which also didn't match intensity
+scaling. `Hard` mode was reverted. The correct fix — padding the source texture with
+a clamped border of width ≥ `BlurRadius` before blurring — is deferred.
+
+**Files modified:**
+- `src/Gausslite.Core/Capture/ICaptureSession.cs` — `IsBorderRequired { set; }`
+- `src/Gausslite.Core/Capture/WinRTCaptureSession.cs` — proxy to WGC session
+- `src/Gausslite.Core/Capture/CaptureEngine.cs` — set `IsBorderRequired = false`
+- `src/Gausslite.Core/Blur/IBlurInterop.cs` — `FlushDevice` method
+- `src/Gausslite.Core/Blur/Win2DBlurInterop.cs` — `FlushDevice` + vtable Flush impl
+- `src/Gausslite.Core/Blur/BlurPipeline.cs` — call `FlushDevice`, remove diag flag
+- `src/Gausslite.Core/Gausslite.Core.csproj` — TFM 19041 → 22621
+- `src/Gausslite.Overlay/Gausslite.Overlay.csproj` — TFM bump
+- `src/Gausslite.App/Gausslite.App.csproj` — TFM bump
+- `tests/Gausslite.Core.Tests/Gausslite.Core.Tests.csproj` — TFM bump
+- `tests/Gausslite.App.Tests/Gausslite.App.Tests.csproj` — TFM bump
+- `tests/Gausslite.Core.Tests/Blur/BlurPipelineTests.cs` — `FlushDevice` assertions
+
+**Test counts:** Core 62/62, App 46/46 (x64). Build: 0 errors, 1 pre-existing
+Win2D AnyCPU warning (harmless, documented in csproj).
+
+---
+
 ### 2026-05-01 — Tray menu region scope submenu (UI scaffold)
 
 **What shipped.** `BlurRegionScope` enum (`ChatList`, `Conversation`, `Both`) added to

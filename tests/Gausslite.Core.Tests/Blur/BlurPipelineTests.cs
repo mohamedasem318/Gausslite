@@ -148,6 +148,7 @@ public sealed class BlurPipelineTests
         Assert.Null(result);
         _interop.DidNotReceive().DrawBlurFromCache(
             Arg.Any<IBlurCanvasDevice>(), Arg.Any<IBlurRenderTarget>(), Arg.Any<ICachedFrame>(), Arg.Any<float>());
+        _interop.DidNotReceive().FlushDevice(Arg.Any<IBlurCanvasDevice>());
     }
 
     [Fact]
@@ -169,6 +170,7 @@ public sealed class BlurPipelineTests
         Assert.NotNull(result);
         _interop.Received(1).DrawBlurFromCache(
             Arg.Any<IBlurCanvasDevice>(), rt, cachedFrame, 42.5f);
+        _interop.Received(1).FlushDevice(Arg.Any<IBlurCanvasDevice>());
     }
 
     [Fact]
@@ -184,5 +186,6 @@ public sealed class BlurPipelineTests
         var result = pipeline.TryRenderCurrentFrame();
 
         Assert.Same(rt, result);
+        _interop.Received(1).FlushDevice(Arg.Any<IBlurCanvasDevice>());
     }
 }
