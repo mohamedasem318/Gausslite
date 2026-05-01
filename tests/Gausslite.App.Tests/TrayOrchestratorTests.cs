@@ -507,4 +507,46 @@ public sealed class TrayOrchestratorTests
         _blurPipeline.Received(1).TryRenderCurrentFrame();
         _overlayWindow.DidNotReceive().PresentFrame(Arg.Any<IBlurRenderTarget>());
     }
+
+    [Fact]
+    public void SetScope_Default_IsBoth()
+    {
+        SetupWhatsAppNotRunning();
+        using var sut = CreateSut();
+
+        Assert.Equal(BlurRegionScope.Both, sut.CurrentScope);
+    }
+
+    [Fact]
+    public void SetScope_ChatList_UpdatesCurrentScope()
+    {
+        SetupWhatsAppNotRunning();
+        using var sut = CreateSut();
+
+        sut.SetScope(BlurRegionScope.ChatList);
+
+        Assert.Equal(BlurRegionScope.ChatList, sut.CurrentScope);
+    }
+
+    [Fact]
+    public void SetScope_Conversation_UpdatesCurrentScope()
+    {
+        SetupWhatsAppNotRunning();
+        using var sut = CreateSut();
+
+        sut.SetScope(BlurRegionScope.Conversation);
+
+        Assert.Equal(BlurRegionScope.Conversation, sut.CurrentScope);
+    }
+
+    [Fact]
+    public void SetScope_Both_UpdatesCurrentScope()
+    {
+        SetupWhatsAppNotRunning();
+        using var sut = CreateSut();
+
+        sut.SetScope(BlurRegionScope.Both);
+
+        Assert.Equal(BlurRegionScope.Both, sut.CurrentScope);
+    }
 }
