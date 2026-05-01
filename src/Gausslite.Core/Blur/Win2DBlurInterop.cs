@@ -53,4 +53,40 @@ public sealed class Win2DBlurInterop : IBlurInterop
         var size = frame.ContentSize;
         return ((float)size.Width, (float)size.Height);
     }
+
+    /// <inheritdoc/>
+    public ICachedFrame CreateCachedFrame(IBlurCanvasDevice canvasDevice, float width, float height)
+    {
+        var device = ((Win2DCanvasDeviceWrapper)canvasDevice).CanvasDevice;
+        // dpi: 96f keeps DIPs == pixels, matching the render target convention.
+        var crt = new CanvasRenderTarget(device, width, height, 96f);
+        return new Win2DCachedFrame(crt, width, height);
+    }
+
+    /// <inheritdoc/>
+    public void UpdateCachedFrame(IBlurCanvasDevice canvasDevice, ICachedFrame cachedFrame, ICaptureFrame frame)
+    {
+        var device = ((Win2DCanvasDeviceWrapper)canvasDevice).CanvasDevice;
+        var cacheTarget = ((Win2DCachedFrame)cachedFrame).CanvasRenderTarget;
+        using var frameBitmap = CanvasBitmap.CreateFromDirect3D11Surface(device, frame.Frame.Surface);
+        using var session = cacheTarget.CreateDrawingSession();
+        session.DrawImage(frameBitmap);
+    }
+
+    /// <inheritdoc/>
+    public void DrawBlurFromCache(IBlurCanvasDevice canvasDevice, IBlurRenderTarget renderTarget, ICachedFrame cachedFrame, float radius)
+    {
+        var device = ((Win2DCanvasDeviceWrapper)canvasDevice).CanvasDevice;
+        var rt = (Win2DBlurRenderTarget)renderTarget;
+        var cacheTarget = ((Win2DCachedFrame)cachedFrame).CanvasRenderTarget;
+
+        var blurEffect = new GaussianBlurEffect
+        {
+            Source = cacheTarget,
+            BlurAmount = radius,
+        };
+
+        using var session = rt.CanvasRenderTarget.CreateDrawingSession();
+        session.DrawImage(blurEffect);
+    }
 }

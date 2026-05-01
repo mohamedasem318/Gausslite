@@ -109,8 +109,20 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
 
     public void SetIntensity(BlurIntensityPreset preset)
     {
+        var radius = BlurIntensityPresets.ToRadius(preset);
+        StartupLog.Info($"SetIntensity: preset={preset}, radius={radius:F1} DIPs");
         CurrentIntensity = preset;
-        _blurPipeline.BlurRadius = BlurIntensityPresets.ToRadius(preset);
+        _blurPipeline.BlurRadius = radius;
+        var reRendered = _blurPipeline.TryRenderCurrentFrame();
+        if (reRendered is not null)
+        {
+            StartupLog.Info($"SetIntensity: presenting re-rendered frame ({reRendered.Width}x{reRendered.Height})");
+            _overlayWindow.PresentFrame(reRendered);
+        }
+        else
+        {
+            StartupLog.Info("SetIntensity: no cached frame yet; new radius will apply on next WGC frame");
+        }
     }
 
     public void EnableBlur()

@@ -206,6 +206,7 @@ public partial class App : Application
         public void Initialize(IDirect3DDevice device) { }
         public IBlurRenderTarget BlurFrame(ICaptureFrame frame)
             => throw new NotSupportedException("NullBlurPipeline does not process frames.");
+        public IBlurRenderTarget? TryRenderCurrentFrame() => null;
         public void Dispose() { }
     }
 }

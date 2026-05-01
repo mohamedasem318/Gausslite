@@ -6,6 +6,78 @@
 
 ## Session history
 
+### 2026-05-01 — Blur intensity on-demand repaint investigation (multi-session arc)
+
+**What shipped.** The blur intensity preset feature is complete: `BlurIntensityPreset`
+enum (Light / Medium / Heavy), tray menu "Blur intensity" submenu with checkmark tracking,
+runtime-configurable `BlurPipeline.BlurRadius` (`volatile float` backing field), and an
+input-frame cache (`ICachedFrame` / `Win2DCachedFrame`) that supports on-demand re-render
+via `TryRenderCurrentFrame()`. `D3DImage.AddDirtyRect(full rect)` and
+`Image.InvalidateVisual()` are in place on every present. Diagnostic logging covers the
+full re-render path. The feature works correctly while WhatsApp has active cursor input.
+
+**The bug.** After the preset submenu shipped (2026-04-30 session), switching intensity
+while WhatsApp was fully idle — sitting on screen with no cursor movement — had no visible
+effect. The investigation arc below documents what was tried in order.
+
+**Session 1 — Volatile fix (wrong hypothesis).** Initial investigation concluded the bug
+was a stale-read of `BlurRadius` from the frame-processing thread. Made the backing field
+`volatile`, added cross-thread tests. The fix appeared to work in testing. It did not
+address the actual cause.
+
+**Session 2 — Correct root cause identified.** Systematic testing confirmed cursor
+movement always applies the new radius; idle periods of any duration do not. Root cause:
+Windows Graphics Capture only delivers frames when the captured window's content changes.
+WhatsApp idle → no WGC frames → `OnFrameArrived` never fires → the radius change is
+never rendered. Fix: input-frame cache (`ICachedFrame` / `Win2DCachedFrame`) so
+`TryRenderCurrentFrame()` can re-render from a cached surface without a new WGC frame.
+`TrayOrchestrator.SetIntensity` calls `TryRenderCurrentFrame` + `PresentFrame`
+immediately after writing the new radius.
+
+**Session 3 — Diagnostic logging.** Instrumented `SetIntensity`, `TryRenderCurrentFrame`,
+`UpdateD3DImage`, and `PresentFrame` with `gausslite-startup.log` entries. Confirmed the
+chain executes on every preset change.
+
+**Session 4 — WPF compositor repaint fix.** Logs confirmed the re-render chain ran but
+no screen update appeared. `Image.InvalidateVisual()` was missing from
+`OverlayWindow.PresentFrame`. Without it, WPF's render thread does not schedule a render
+pass for on-demand presents (the natural 60fps capture path keeps the render thread busy
+and was unaffected). Added `InvalidateVisual()` after `_bridge.UpdateD3DImage()`. Tested
+and appeared to resolve the issue.
+
+**Session 5 — Stale-exe build path (false negatives).** During this arc, at least one
+session retested a stale Release binary that did not include the latest changes. This
+produced false negatives — the fix appeared broken, but the correct binary had not been
+run. Correct exe: `bin\x64\Release\net8.0-windows10.0.19041.0\Gausslite.App.exe`.
+
+**Session 6 — Compositor timing diagnostics.** Added a `CompositionTarget.Rendering`
+subscription in `OverlayWindow.PresentFrame` that logs elapsed time for the first 5
+compositor ticks after each on-demand present. Logs showed the compositor fires within
+4–10 ms of `InvalidateVisual`, 5 render passes complete within 70 ms. Compositor
+scheduling is healthy.
+
+**Session 7 — Confirmed partial fix only.** With the correct binary and compositor
+confirmed healthy, retested against a genuinely idle WhatsApp: switching presets still
+produced no visible update until cursor movement. `AddDirtyRect` + `InvalidateVisual`
+are sufficient for the natural 60fps path; they are not sufficient to force a DWM pixel
+update during idle periods when WhatsApp emits no WGC frames. Why `InvalidateVisual`
+does not produce a visible screen update in this specific condition — despite the
+compositor running — is not fully understood.
+
+**Decision.** Ship as a known issue. Workaround: move the cursor over WhatsApp after
+changing a preset. Deferred to v1.0 IDD architecture; the IDD compositor renders
+continuously to a phantom framebuffer and does not depend on WGC frame delivery.
+
+**Files created:** `ICachedFrame.cs`, `Win2DCachedFrame.cs`
+
+**Files modified:** `IBlurInterop.cs`, `Win2DBlurInterop.cs`, `IBlurPipeline.cs`,
+`BlurPipeline.cs`, `TrayOrchestrator.cs`, `App.xaml.cs`, `OverlayWindow.cs`,
+`BlurPipelineTests.cs`, `TrayOrchestratorTests.cs`
+
+**Final test counts:** Core 62/62, App 42/42 (x64). Build: 1 pre-existing Win2D warning, 0 errors.
+
+---
+
 ### 2026-04-30 — Runtime-configurable blur radius + tray intensity submenu (v0.2.0)
 
 **Goal:** Two coupled items from the v0.2.0 milestone: make `BlurPipeline`'s blur
