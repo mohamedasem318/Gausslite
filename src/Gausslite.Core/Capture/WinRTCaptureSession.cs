@@ -10,5 +10,10 @@ internal sealed class WinRTCaptureSession : ICaptureSession
 
     public void StartCapture() => _session.StartCapture();
 
+    public bool IsBorderRequired
+    {
+        set => _session.IsBorderRequired = value;
+    }
+
     public void Dispose() => _session.Dispose();
 }
