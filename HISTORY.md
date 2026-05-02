@@ -6,6 +6,129 @@
 
 ## Session history
 
+### 2026-05-03 — E_NOINTERFACE audit: six sites eliminated across Blur module
+
+**Context.** A previous session fixed one `Marshal.GetObjectForIUnknown + managed-cast` site
+in `Win2DBlurInterop.TryReadBgra` (the IDirect3DSurface-path bug). An integration test was
+added and passed on WARP. Post-fix, production still exhibited `InvalidCastException` in
+`Win2DBlurRenderTarget..ctor` at line 90 — a different site, same root cause.
+
+---
+
+**Bug class.**
+
+Any WinRT object registered via `MarshalInterface<T>.FromAbi` is entered into CsWinRT's
+ComWrappers global instance table keyed by IUnknown identity. `Marshal.GetObjectForIUnknown(ptr)`
+for any pointer sharing that IUnknown returns the registered managed projection, not a raw BCL
+RCW. Casting the managed projection to a private COM interface (not declared in Windows metadata
+— `ID3D11Device`, `IDirect3DDxgiInterfaceAccess`, etc.) fails with `InvalidCastException`
+because the managed projection doesn't implement that type in the .NET type system.
+
+---
+
+**Audit — 6 sites found.**
+
+**Sites A/B/C** — `(IDirect3DDxgiInterfaceAccess)Marshal.GetObjectForIUnknown(dxgiAccessPtr)`:
+
+| Site | File | Method | Line |
+|---|---|---|---|
+| A | `Win2DBlurInterop.cs` | `GetD3D11DevicePtr` | 513 |
+| B | `Win2DBlurRenderTarget.cs` | `GetD3D11DevicePtr` | 149 |
+| C | `Win2DBlurInterop.cs` | `FlushD3D11Context` | 457 |
+
+`dxgiAccessPtr` is obtained by `Marshal.QueryInterface(inspectablePtr, IID_IDirect3DDxgiInterfaceAccess)`
+where `inspectablePtr` is `IWinRTObject.NativeObject.ThisPtr` of a registered `IDirect3DDevice`.
+
+**Work by luck.** In both WARP and production, `IDirect3DDxgiInterfaceAccess` is a COM
+**tear-off** on `IDirect3DDevice` — a separate COM object with a different IUnknown identity
+from the WinRT device wrapper. `GetObjectForIUnknown` doesn't find the registered projection,
+creates a fresh BCL RCW, and the managed cast succeeds via traditional COM QI. Would break if
+Windows changes the implementation.
+
+**Sites D/E/F** — `(ID3D11Device)Marshal.GetObjectForIUnknown(d3d11DevicePtr)`:
+
+| Site | File | Method | Line | Status |
+|---|---|---|---|---|
+| D | `Win2DBlurRenderTarget.cs` | constructor | 90 | **Throwing in production** |
+| E | `Win2DBlurInterop.cs` | `CreateCachedFrame` | 93 | Would throw in production |
+| F | `Win2DBlurInterop.cs` | `CreateStagingTexture` | 182 | Would throw in production |
+
+`d3d11DevicePtr` is the raw `ID3D11Device*` returned by `IDirect3DDxgiInterfaceAccess::GetInterface`.
+
+**Production (hardware GPU):** Windows implements `IDirect3DDevice` via COM aggregation — the
+WinRT wrapper's IUnknown **is** the ID3D11Device's IUnknown. `GetObjectForIUnknown` returns the
+registered CsWinRT `IDirect3DDevice` projection. The managed cast to `ID3D11Device` fails
+(CsWinRT projection doesn't implement this .NET interface type) → `InvalidCastException`.
+
+**WARP (integration test):** The WARP D3D11 device and WinRT wrapper are distinct COM objects
+(no aggregation, different IUnknown). `GetObjectForIUnknown` creates a new BCL RCW, the cast
+succeeds via COM QI. **This is why the previous integration test missed Sites D/E/F.**
+
+---
+
+**Fixes.**
+
+All 6 sites converted to raw vtable dispatch:
+
+- Sites A/B/C: `CallGetInterface(dxgiAccessPtr, in IID_ID3D11Device, out d3d11DevicePtr)` — reads
+  IDirect3DDxgiInterfaceAccess vtable slot 3 directly, bypassing the managed layer entirely.
+
+- Sites D/E/F: `CreateTexture2DRaw(d3d11DevicePtr, ref desc, out texture)` — reads ID3D11Device
+  vtable slot 5 directly.
+
+Both dead `[ComImport]` interface definitions (`IDirect3DDxgiInterfaceAccess`, `ID3D11Device`)
+removed from both files. `Win2DBlurRenderTarget` gained its own `GetInterfaceDelegate`,
+`CreateTexture2DDelegate`, `CallGetInterface`, and `CreateTexture2DRaw` (mirroring the helpers
+that already existed in `Win2DBlurInterop`).
+
+Post-fix grep: zero `GetObjectForIUnknown` call sites in `src/Gausslite.Core/Blur/` (two
+remaining matches are comments explaining why the pattern is absent).
+
+---
+
+**Vtable slot reference (both files).**
+
+| Slot | Object | Method | Used in |
+|---|---|---|---|
+| 3 | `IDirect3DDxgiInterfaceAccess*` | `GetInterface` | `CallGetInterface` |
+| 5 | `ID3D11Device*` | `CreateTexture2D` | `CreateTexture2DRaw` |
+| 40 | `ID3D11Device*` | `GetImmediateContext` | `FlushD3D11Context`, `TryReadBgra` |
+| 111 | `ID3D11DeviceContext*` | `Flush` | `FlushD3D11Context`, `TryReadBgra` |
+| 47 | `ID3D11DeviceContext*` | `CopyResource` | `TryReadBgra` |
+| 14 | `ID3D11DeviceContext*` | `Map` | `TryReadBgra` |
+| 15 | `ID3D11DeviceContext*` | `Unmap` | `TryReadBgra` |
+
+---
+
+**Test fix.**
+
+Added `AllConvertedCallSites_WhileDeviceIsAlive_DoNotThrow` to
+`Win2DBlurInteropIntegrationTests`. Exercises all 6 converted paths in sequence:
+
+1. `CreateRenderTarget` → `Win2DBlurRenderTarget` ctor → Sites B (fixed) + D (fixed)
+2. `CreateCachedFrame` → Site E (fixed) + `MarshalInterface<IDirect3DSurface>.FromAbi`
+3. `CreateStagingTexture` → Site F (fixed)
+4. `FlushDevice` → `FlushD3D11Context` → Site C (fixed)
+5. `TryReadBgra` → previously fixed site (surface path)
+
+All run while `_d3dDevice` (created via `MarshalInterface<IDirect3DDevice>.FromAbi`) is alive.
+Surface path (step 5) catches regression in WARP because IDirect3DSurface's
+IDirect3DDxgiInterfaceAccess shares IUnknown with the registered surface projection.
+Device-path sites D/E/F catch regression only on hardware GPU (WARP doesn't reproduce the
+IUnknown identity collapse for those paths).
+
+---
+
+Smoke test: zero `InvalidCastException` entries, `detection-succeeded` on every trigger
+(first frame + all BoundsChanged), plausible chatList/conversation rects, no exceptions
+from any call site. Scope switch (ChatList → Conversation → Both) logged cleanly.
+
+Test counts: Core 87/87, App 50/50 (x64). Build: 0 errors, 1 pre-existing Win2D AnyCPU warning.
+
+Commit: `fefd970` on branch `v0.2.0-detection-plumbing`.
+
+---
+
 ### 2026-05-02 — v0.2.0 Session A: detection plumbing
 
 **Goal.** Wire `WhatsAppRegionDetector` into the live capture path so detection runs on every

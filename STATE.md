@@ -12,6 +12,35 @@ definition and CHANGELOG.md for full v0.1.x development history.
 
 ## Last session summary
 
+**2026-05-03 — E_NOINTERFACE audit: six sites eliminated across Blur module (branch v0.2.0-detection-plumbing).**
+
+Full codebase audit of `src/Gausslite.Core/Blur/` for the `Marshal.GetObjectForIUnknown +
+managed-cast` bug class after a previous session's single-site fix left five more live sites.
+
+**6 sites found and fixed.** Sites A/B/C (`GetD3D11DevicePtr` ×2, `FlushD3D11Context`) used
+`(IDirect3DDxgiInterfaceAccess)Marshal.GetObjectForIUnknown(dxgiAccessPtr)` — worked by luck
+because `IDirect3DDxgiInterfaceAccess` is a COM tear-off on `IDirect3DDevice` (different
+IUnknown from the registered WinRT projection). Sites D/E/F (`Win2DBlurRenderTarget` ctor,
+`CreateCachedFrame`, `CreateStagingTexture`) used `(ID3D11Device)Marshal.GetObjectForIUnknown(d3d11DevicePtr)` — throws `InvalidCastException` in production because on a hardware GPU the
+`ID3D11Device*` from `GetInterface` shares IUnknown with the registered CsWinRT IDirect3DDevice
+projection; in WARP the test device keeps them separate so the WARP integration test missed it.
+All 6 sites converted to `CreateTexture2DRaw` (vtable slot 5) and `CallGetInterface` (vtable
+slot 3). Both dead `[ComImport]` interface definitions removed from both files.
+`Win2DBlurRenderTarget` gained its own `GetInterfaceDelegate`, `CreateTexture2DDelegate`,
+`CallGetInterface`, and `CreateTexture2DRaw` helpers.
+
+**Test.** New `AllConvertedCallSites_WhileDeviceIsAlive_DoNotThrow` integration test exercises
+all 6 converted paths while the WinRT IDirect3DDevice and IDirect3DSurface projections are alive
+in the CsWinRT ComWrappers table. Surface path (TryReadBgra) catches regression in WARP;
+device path catches regression on hardware GPU.
+
+**Smoke test.** Zero `InvalidCastException` entries, detection-succeeded on every trigger
+with plausible rects, no exceptions from any call site.
+
+Test counts: Core 87/87, App 50/50 (x64). Build: 0 errors, 1 pre-existing Win2D AnyCPU warning.
+
+---
+
 **2026-05-02 — v0.2.0 Session A: detection plumbing (branch v0.2.0-detection-plumbing).**
 
 Wired `WhatsAppRegionDetector` into the live capture path. Detection only — no clip
@@ -97,6 +126,16 @@ None.
 ## Recent decisions
 
 (See `PLAN.md` Decisions Log for the full history.)
+
+- **2026-05-03 — Vtable-only rule for private COM interfaces in the Blur module.**
+  `Marshal.GetObjectForIUnknown + managed cast` is banned for any private COM interface
+  (`ID3D11Device`, `IDirect3DDxgiInterfaceAccess`, `ID3D11Texture2D`, etc.) in
+  `src/Gausslite.Core/Blur/`. These interfaces are not in Windows metadata; CsWinRT does
+  not project them, but `GetObjectForIUnknown` can return a CsWinRT projection if the native
+  pointer happens to share IUnknown with a registered WinRT object — producing an
+  `InvalidCastException` that is timing/hardware-dependent and not reliably caught in WARP
+  tests. All access must use raw vtable dispatch. Grep enforcement: zero
+  `GetObjectForIUnknown` call sites remain in `src/Gausslite.Core/Blur/`.
 
 - **2026-05-02 — Region detector wiring deferred; issue #30 resolved.**
   The detector was originally wiring-deferred because the chat-list assignment was

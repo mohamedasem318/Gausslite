@@ -47,6 +47,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still hides the overlay; fully-visible case applies no clip.
 
 ### Fixed
+- E_NOINTERFACE bug class fully eliminated across the blur module. Six
+  `Marshal.GetObjectForIUnknown + managed-cast` sites in `Win2DBlurInterop` and
+  `Win2DBlurRenderTarget` were converted to raw vtable dispatch. Sites D/E/F
+  (`Win2DBlurRenderTarget` constructor, `CreateCachedFrame`, `CreateStagingTexture`) threw
+  `InvalidCastException` in production: on a hardware GPU the `ID3D11Device*` returned by
+  `IDirect3DDxgiInterfaceAccess::GetInterface` shares IUnknown identity with the registered
+  CsWinRT `IDirect3DDevice` projection, so `Marshal.GetObjectForIUnknown` returns that
+  projection and the managed cast to `ID3D11Device` fails. Sites A/B/C (`GetD3D11DevicePtr`
+  ×2, `FlushD3D11Context`) had the same structure but worked by luck — `IDirect3DDxgiInterfaceAccess`
+  is a COM tear-off on `IDirect3DDevice` with a different IUnknown identity, so the lookup
+  missed the registered projection. All six sites now use `CreateTexture2DRaw` (vtable slot 5)
+  or `CallGetInterface` (vtable slot 3); both dead `[ComImport]` interface definitions removed.
+  New integration test `AllConvertedCallSites_WhileDeviceIsAlive_DoNotThrow` covers all six paths.
+
 - Region detection now correctly identifies the chat list and conversation panes in RTL
   languages (Arabic, Hebrew) by detecting which side of the window has the navigation
   rail. The detector walks inward from each outer edge and measures how far it can travel
