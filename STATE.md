@@ -12,126 +12,57 @@ definition and CHANGELOG.md for full v0.1.x development history.
 
 ## Last session summary
 
-**2026-05-02 — Edge-fade fix + true-region occlusion clipping.**
+**2026-05-02 — Region detection arc: UIA recon, CV detector, smoke tool.**
 
-Two features shipped this session.
+Three deliverables shipped across this arc.
 
-**Bug fix — Blur edge fade (Task 1).**
-Root cause confirmed via systematic debugging: `GaussianBlurEffect` default `BorderMode = Soft`
-fades out-of-bounds samples to transparent, creating a gradient fringe within `BlurRadius`
-pixels of every edge of the render target. The 14 × 7 px WGC-to-overlay size mismatch
-(documented in the previous session) compounds the effect when the render target is stretched
-to fill the overlay window.
+**UiaDump recon tool.** `tools/UiaDump/` is a standalone diagnostic that dumps
+WhatsApp's full UI Automation tree to console. Finding: WhatsApp Desktop is a
+WebView2 shell — the UIA tree stops at the `WebView2` boundary and chat content
+(message list, chat header, contact list) is invisible to UIA. This invalidated
+the original v0.2.0 plan of "UIA primary, CV fallback."
 
-Fix: `Win2DBlurInterop.DrawPaddedBlur` (new private helper) pads the source frame before
-blurring. An intermediate `CanvasRenderTarget` of size `(W + 2·pad) × (H + 2·pad)` is
-allocated, filled with edge-clamped content via `BorderEffect.Clamp` + `DrawImage(sourceRect: (-pad,-pad,W+2pad,H+2pad))`,
-blurred via `GaussianBlurEffect`, then only the center crop `(pad, pad, W, H)` is written
-to the final D3D11 shared texture. Pad = `ceil(BlurRadius)`. Both `DrawBlur` (live frames)
-and `DrawBlurFromCache` (on-demand re-render) use the same helper. First-frame diagnostic
-log added to `TrayOrchestrator.OnFrameArrived` to record WGC ContentSize, overlay DIP bounds,
-and BlurRadius on frame #1.
+**WhatsAppRegionDetector (CV-primary).** Following the UIA-to-CV pivot,
+`src/Gausslite.Core/Detection/WhatsAppRegionDetector` was built as a pure-C#
+region detector with no third-party CV dependencies. It operates on BGRA frames
+already captured by the blur pipeline and uses three-row vertical-divider edge
+consensus to locate the boundary between the chat-list and conversation panes.
+Returns two `Rect` values in window coordinate space. 7 unit tests, all passing.
 
-**Feature — Pixel-region occlusion clipping (Task 2).**
-Replaces the v0.1.0 "center-point hide-all" behavior. When another window partially covers
-WhatsApp, the overlay now clips to the visible region in real time.
+**RegionDump smoke tool.** `tools/RegionDump/` is a standalone smoke-test utility
+that captures one WhatsApp frame, runs the detector, and saves both a raw PNG and
+an annotated PNG (detected boundary drawn). Eyeball-verified on default, narrow,
+and wide LTR English WhatsApp Desktop layouts.
 
-`IWindowTracker` change: `OcclusionChanged: EventHandler<bool>` and `IsOccluded: bool`
-replaced by `VisibleRegionChanged: EventHandler<IReadOnlyList<Rect>>` and
-`VisibleRegion: IReadOnlyList<Rect>?`. Empty list = fully occluded; single rect = visible;
-partial list = L-shape or multi-rect clip.
-
-`WindowTracker` change: `IsOccludedAtCenter` (center-point hit test) replaced by
-`ComputeVisibleRegion` (internal static, testable). Algorithm: walk Z-order above WhatsApp
-using `GetPreviousWindow` (`GW_HWNDPREV`), skip overlay HWND and minimized/invisible windows,
-subtract each covering window's rect via a 4-way split that produces up to 4 sub-rects
-per overlap. Two new `IWin32Api` methods: `GetPreviousWindow` and `IsWindowVisible`.
-
-`IOverlayWindow` gains `SetClip(IReadOnlyList<Rect>?)` which builds a frozen WPF
-`GeometryGroup` of `RectangleGeometry` instances (in overlay-local DIP coordinates) and
-sets it as `_contentRoot.Clip`. Null clears the clip. `TrayOrchestrator.ShowOverlay` always
-calls `ApplyRegionClip` after `MoveToBounds` so the clip is refreshed on every show and
-every `VisibleRegionChanged` event. `HideOverlay` clears the clip before parking offscreen.
-
-Eager-armed-setup contract preserved: `ComputeVisibleRegion` runs on already-captured frames;
-region detection does not gate capture or overlay creation.
-
-Three follow-up bugs found via smoke test and fixed in the same session:
-
-**Bug — title-bar "notch":** WhatsApp's own WinUI 3 `InputNonClientPointerSource` HWND sits
-above the main HWND in Z-order and covers the title bar area. `ComputeVisibleRegion` was
-subtracting it and clipping the title bar out of the blur. Fixed by skipping windows whose
-process ID matches WhatsApp's (`IWin32Api.GetWindowProcessId` added).
-
-**Bug — spurious clip patches during movement:** System UI windows with `WS_EX_TOOLWINDOW`
-(taskbar strips, `TopLevelWindowForOverflowXamlIsland`, DWM helpers) appear above normal
-windows and their rects intersected WhatsApp at various positions as it was dragged.
-`ComputeVisibleRegion` was counting them as covering apps and fragmenting the visible region.
-Fixed by skipping `WS_EX_TOOLWINDOW` windows (`IWin32Api.GetWindowExStyle` added).
-
-**Bug — solid-colour placeholder flash during drag:** `BoundsOutgrewLastBlurredFrame` compared
-DIP overlay width (1294) against WGC physical-pixel frame width (1280). The 14 px structural
-WGC-content-area gap always exceeded the `+1` threshold, so the placeholder was shown on EVERY
-position change — not just resizes. Fixed by replacing the check with `OverlaySizeGrew` which
-compares consecutive DIP bounds sizes. A pure move preserves the same DIP size and never
-triggers the placeholder; an actual resize still shows it. Fields `_lastBlurredFrameWidth`/
-`_lastBlurredFrameHeight`/`_lastBlurredFrameTimestamp` removed (no longer needed).
+**Known limitation — deferred wiring.** The chat-list-vs-conversation assignment
+heuristic (narrower side = chat list) is wrong in wide mode, where the conversation
+pane can be wider than the chat list. Filed as GitHub issue #30
+(https://github.com/mohamedasem318/Gausslite/issues/30); proposed fix is
+horizontal-edge density analysis. Wiring the detector into BlurPipeline,
+OverlayWindow, and the tray submenu is deliberately deferred until the heuristic
+is resolved. The tray "Blur region" submenu remains a no-op.
 
 Test counts: Core 68/68, App 46/46 (x64). Build: 0 errors, 1 pre-existing Win2D AnyCPU warning.
 
-**Previous session (2026-05-02 — Idle repaint fix + WGC capture border + TFM bump to 22621).**
-
-Three bugs diagnosed from log analysis and fixed in one session:
-
-**Bug 1 — Blur intensity preset changes had no visible effect when WhatsApp was idle.**
-Root cause confirmed via log: `TryRenderCurrentFrame` re-renders on the synchronous
-UI-thread path (no dispatcher hop), so the D3D11 UMD driver had not flushed its
-CPU-side command buffer by the time `D3DImageBridge` opened the shared D3D9Ex texture.
-D3D9Ex read stale GPU content; WPF composited the previous frame regardless of
-`InvalidateVisual` firing. Fix: `IBlurInterop.FlushDevice` added (calls
-`ID3D11DeviceContext::Flush` via vtable dispatch — slots 40 for `GetImmediateContext`,
-111 for `Flush`); called at the end of `BlurPipeline.TryRenderCurrentFrame` after all
-Win2D sessions complete. `DiagnosticOverlayEnabled` diagnostic flag removed now that
-root cause is confirmed. Issue #23 closed.
-
-**Bug 2 — Yellow/amber border around WhatsApp while blur was active.**
-`GraphicsCaptureSession.IsBorderRequired` was never set; Windows 11 defaults it to
-`true` and draws a system border around the captured window. `ICaptureSession` gains a
-`bool IsBorderRequired { set; }` property; `WinRTCaptureSession` proxies it to the WGC
-session; `CaptureEngine.Start` sets it `false` before `StartCapture`.
-
-**Bug 3 — Blur fades/washes at edges.**
-`GaussianBlurEffect.BorderMode = Soft` (default) fades out-of-bounds samples to
-transparent, creating a gradient fringe. Compounded by a 14 × 7 px size mismatch
-between WGC ContentSize (1280 × 765) and overlay window bounds (1294 × 772). An
-attempt to use `EffectBorderMode.Hard` made the edge look crisper than the interior
-(repeated-pixel artifact), so it was reverted. Documented as a known issue; correct
-fix (pad the source texture before blurring) deferred.
-
-**TFM bump.** All five `.csproj` files moved from `net8.0-windows10.0.19041.0` to
-`net8.0-windows10.0.22621.0`. Required to access `GraphicsCaptureSession.IsBorderRequired`
-in the SDK surface area.
-
-Test counts: Core 62/62, App 46/46 (x64). Build: 0 errors, 1 pre-existing Win2D
-AnyCPU warning.
+**Previous sessions (2026-05-02 — Edge-fade fix, occlusion clipping, idle repaint,
+WGC capture border, TFM bump to 22621)** — see HISTORY.md for full notes.
 
 ## Next up
 
 **v0.2.0 — "The right regions"** remaining items. `IAppProfile`, blur-intensity presets,
 AddDirtyRect + InvalidateVisual repaint improvements, region scope submenu scaffold,
-edge-fade fix, and pixel-region occlusion clipping are all done.
+edge-fade fix, pixel-region occlusion clipping, and the region detector module are all done.
 
 Pick one for the next session:
 
 v0.2.0 remaining work (no required order):
 
-- RegionDetector module: UIA (UI Automation) primary with a
-  computer-vision fallback, returning chat-list and conversation
-  rects in WhatsApp's window coordinate space. Headline feature;
-  largest single piece of work. Will extend `IAppProfile` when it lands.
-- Tray menu region scope submenu ("Blur chat list" / "Blur
-  conversation" / "Blur both") — depends on RegionDetector
-- Smoke test on 3 different WhatsApp Desktop layouts (default, narrow, wide)
+- Smoke test on 3 different WhatsApp Desktop layouts (default, narrow, wide) — verifies
+  the v0.2.0 features that ARE wired (occlusion clipping, intensity presets, edge-fade fix).
+  Does not require region detection to be wired.
+- Wire RegionDetector into BlurPipeline / OverlayWindow / tray submenu — optional v0.2.0
+  extension; currently deferred. Depends on resolving issue #30 first (wide/RTL heuristic
+  wrong), or shipping with the known limitation documented.
 
 ## Blockers
 
@@ -140,6 +71,19 @@ None.
 ## Recent decisions
 
 (See `PLAN.md` Decisions Log for the full history.)
+
+- **2026-05-02 — Region detector wiring deferred until issue #30 is resolved.**
+  The detector module is built and tested, but the chat-list-vs-conversation
+  assignment heuristic (narrower side = chat list) produces wrong results in
+  wide mode and RTL layouts. Wiring a region-aware blur that mis-identifies
+  which pane is which is worse than no region-aware blur. Defer wiring until the
+  heuristic is replaced with horizontal-edge density analysis (see issue #30).
+
+- **2026-05-02 — Pivoted from UIA-primary-with-CV-fallback to CV-only.**
+  `tools/UiaDump` recon confirmed WhatsApp Desktop is a WebView2 shell; UIA cannot
+  see any chat content past the WebView2 boundary. The UIA path cannot work on the
+  current WhatsApp build at all — not partially, not as a primary. Two-path code for
+  a path that never executes is dead weight. `WhatsAppRegionDetector` is CV-only.
 
 - **Blur edge fade fixed via padded intermediate texture.** `Win2DBlurInterop.DrawPaddedBlur`
   allocates a `(W + 2·pad) × (H + 2·pad)` CanvasRenderTarget on each frame render, fills it

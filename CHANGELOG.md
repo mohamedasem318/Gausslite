@@ -16,6 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previous hardcoded behavior. `BlurPipeline.BlurRadius` is now runtime-configurable;
   a cached input frame (`ICachedFrame`) enables on-demand re-render when the preset
   changes.
+- `WhatsAppRegionDetector` internal module: pure-C# CV detector that locates the
+  chat-list/conversation boundary in captured BGRA frames via three-row vertical-divider
+  edge consensus. Lays the groundwork for region-aware blur; not yet wired into the blur
+  pipeline or tray menu (pending resolution of issue #30 — wide/RTL heuristic).
+- `tools/UiaDump`: diagnostic utility that dumps WhatsApp's UI Automation tree;
+  used to confirm that WhatsApp Desktop is a WebView2 shell whose chat content is
+  invisible to UIA.
+- `tools/RegionDump`: smoke-test utility that captures one WhatsApp frame, runs the
+  region detector, and saves raw and annotated PNGs for visual regression verification.
 
 ### Changed
 - Internal refactor: WhatsApp-specific window-detection knowledge extracted behind

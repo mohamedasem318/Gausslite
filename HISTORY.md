@@ -6,6 +6,84 @@
 
 ## Session history
 
+### 2026-05-02 — Region detection arc: UIA recon, CV detector, smoke tool
+
+**UiaDump recon.**
+`tools/UiaDump/` is a standalone C# console utility that walks WhatsApp's full
+UI Automation tree and prints every element (control type, name, bounding rect) to
+stdout. The goal was to determine whether WhatsApp Desktop exposes enough UIA
+structure to locate the chat-list and conversation panes programmatically.
+
+Finding: WhatsApp Desktop is a WebView2 shell. The UIA tree contains a root WinUI 3
+frame and a single `Document` element of type `WebView2`, and nothing beneath it —
+no `List`, no `ListItem`, no named panes, no text content. The WebView2 boundary is
+opaque to UIA; all chat UI is rendered in the web layer and invisible to the
+accessibility tree. The implication is unambiguous: the original v0.2.0 plan of
+"UIA primary, CV fallback" cannot be executed as described. UIA cannot provide even
+a coarse region on the current WhatsApp build.
+
+**Pivot decision — UIA to CV.**
+The original spec allowed for a CV fallback if UIA failed partially. Recon showed UIA
+fails completely — not partially. Keeping a UIA primary path alongside CV would mean
+shipping untestable dead code. Decision: drop the UIA path entirely; make
+`WhatsAppRegionDetector` CV-only from the start. The fallback case never exists on
+the current build, so there is nothing to fall back from.
+
+**WhatsAppRegionDetector.**
+`src/Gausslite.Core/Detection/WhatsAppRegionDetector` is a pure-C# detector with no
+third-party CV dependencies. It receives a BGRA frame (the same type already produced
+by the WGC capture path) and returns two `Rect` values — one for the chat-list pane,
+one for the conversation pane — in window coordinate space.
+
+Algorithm: sample three evenly-spaced rows in the middle vertical band of the frame.
+For each row, compute horizontal pixel-to-pixel luminance differences and find the
+column with the highest contrast transition (the vertical divider between the two
+panes). Take the median of the three per-row peak columns as the consensus divider
+position. Assign the left rect as chat-list and the right rect as conversation based
+on a width heuristic (narrower side = chat list, wider side = conversation).
+
+Implementation notes: operates on captured frames already in memory; no file I/O, no
+COM interop, no additional dependencies. 7 unit tests covering divider detection,
+frame edge cases, and rect output, all passing.
+
+**RegionDump smoke tool.**
+`tools/RegionDump/` is a standalone executable that captures one WhatsApp frame via
+the existing `CaptureEngine` path, instantiates `WhatsAppRegionDetector`, runs it on
+the captured frame, and saves two files: `raw.png` (the unmodified capture) and
+`annotated.png` (the capture with the detected divider column and the two region rects
+drawn as overlaid rectangles). Intended for visual regression testing — run it, inspect
+the annotated PNG, confirm the divider is in the right place.
+
+Verified on three layouts: default (balanced panes), narrow (WhatsApp window at minimum
+width), and wide (WhatsApp window at near-full-screen width). Divider detection was
+correct on all three. The annotated PNGs were eyeball-verified.
+
+**Known limitation — assignment heuristic, filed as issue #30.**
+The "narrower side = chat list" heuristic fails in wide mode. At near-full-screen width
+the conversation pane expands significantly and becomes the wider side; the heuristic
+then assigns it as chat-list and the chat-list column as conversation. This is a
+mis-identification, not a detection failure — the divider column itself is found
+correctly; only the labelling is wrong.
+
+Filed as https://github.com/mohamedasem318/Gausslite/issues/30. Proposed fix:
+horizontal-edge density analysis — the chat-list pane has dense horizontal edges
+(contact separators, avatars, timestamp text) while the conversation pane has sparser
+edge structure. A density comparison would produce a robust label independent of pane
+width ratios.
+
+**Wiring deferred.**
+`WhatsAppRegionDetector` is not connected to `BlurPipeline`, `OverlayWindow`, or the
+tray "Blur region" submenu. The submenu remains a no-op. Wiring was deliberately
+deferred rather than shipping region-aware blur that mis-identifies panes in wide mode.
+The decision: it is better to hold the feature until issue #30 is resolved than to ship
+behaviour that makes the wrong pane blurry. Region-aware blur is an optional v0.2.0
+extension; it can also be deferred to a later milestone if issue #30 turns out to be
+more involved than expected.
+
+Test counts: Core 68/68, App 46/46 (x64). Build: 0 errors, 1 pre-existing Win2D AnyCPU warning.
+
+---
+
 ### 2026-05-02 — Occlusion false-positive filters + placeholder flash fix
 
 Three bugs discovered via smoke test after the occlusion clipping landed.
