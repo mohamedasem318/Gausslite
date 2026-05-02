@@ -8,6 +8,7 @@ using System.Text;
 using Gausslite.Core.Blur;
 using Gausslite.Core.Diagnostics;
 using Gausslite.Overlay.Interop;
+using System.Collections.Generic;
 
 namespace Gausslite.Overlay;
 
@@ -392,6 +393,25 @@ public sealed class OverlayWindow : IOverlayWindow
         int childCount = VisualTreeHelper.GetChildrenCount(element);
         for (int i = 0; i < childCount && sb.Length < 500; i++)
             AppendElement(VisualTreeHelper.GetChild(element, i), sb);
+    }
+
+    /// <inheritdoc/>
+    public void SetClip(IReadOnlyList<Rect>? visibleRects)
+    {
+        if (visibleRects is null || visibleRects.Count == 0)
+        {
+            _contentRoot.Clip = null;
+            DiagLog.Info("OverlayWindow.SetClip: clip cleared");
+            return;
+        }
+
+        var group = new GeometryGroup { FillRule = FillRule.Nonzero };
+        foreach (var r in visibleRects)
+            group.Children.Add(new RectangleGeometry(r));
+        group.Freeze();
+
+        _contentRoot.Clip = group;
+        DiagLog.Info($"OverlayWindow.SetClip: clip set to {visibleRects.Count} rect(s)");
     }
 
     /// <inheritdoc/>

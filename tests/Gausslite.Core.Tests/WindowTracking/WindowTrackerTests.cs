@@ -169,85 +169,244 @@ public sealed class WindowTrackerTests : IDisposable
         Assert.Equal(rawRect.Bottom, normalized.Bottom);
     }
 
+    // ── ComputeVisibleRegion (testable static seam) ──────────────────────────
+
     [Fact]
-    public void IsOccludedAtCenter_ReturnsFalse_WhenCenterBelongsToWhatsApp()
+    public void ComputeVisibleRegion_ReturnsFullBounds_WhenNoCoveringWindow()
     {
         var whatsapp = new IntPtr(10);
-        var whatsappChild = new IntPtr(11);
         var rect = new RECT { Left = 0, Top = 0, Right = 100, Bottom = 100 };
 
-        _win32.WindowFromPoint(Arg.Is<POINT>(p => p.X == 50 && p.Y == 50)).Returns(whatsappChild);
         _win32.GetRootWindow(whatsapp).Returns(whatsapp);
-        _win32.GetRootWindow(whatsappChild).Returns(whatsapp);
+        _win32.GetPreviousWindow(whatsapp).Returns(IntPtr.Zero); // nothing above
 
-        var isOccluded = WindowTracker.IsOccludedAtCenter(rect, whatsapp, IntPtr.Zero, _win32);
+        var region = WindowTracker.ComputeVisibleRegion(rect, whatsapp, IntPtr.Zero, _win32);
 
-        Assert.False(isOccluded);
+        Assert.Single(region);
+        Assert.Equal(rect.Left,   region[0].Left);
+        Assert.Equal(rect.Top,    region[0].Top);
+        Assert.Equal(rect.Right,  region[0].Right);
+        Assert.Equal(rect.Bottom, region[0].Bottom);
     }
 
     [Fact]
-    public void IsOccludedAtCenter_ReturnsTrue_WhenCenterBelongsToAnotherWindow()
+    public void ComputeVisibleRegion_ReturnsEmpty_WhenFullyCoveredByAnotherWindow()
     {
         var whatsapp = new IntPtr(10);
-        var chrome = new IntPtr(20);
-        var rect = new RECT { Left = 0, Top = 0, Right = 100, Bottom = 100 };
+        var chrome   = new IntPtr(20);
+        var rect     = new RECT { Left = 0, Top = 0, Right = 100, Bottom = 100 };
 
-        _win32.WindowFromPoint(Arg.Any<POINT>()).Returns(chrome);
         _win32.GetRootWindow(whatsapp).Returns(whatsapp);
-        _win32.GetRootWindow(chrome).Returns(chrome);
+        _win32.GetPreviousWindow(whatsapp).Returns(chrome);
+        _win32.GetPreviousWindow(chrome).Returns(IntPtr.Zero);
+        _win32.IsWindowVisible(chrome).Returns(true);
+        _win32.IsIconic(chrome).Returns(false);
+        RECT dummy = default;
+        _win32.GetWindowRect(chrome, out dummy)
+              .Returns(x => { x[1] = rect; return true; }); // covers exactly
 
-        var isOccluded = WindowTracker.IsOccludedAtCenter(rect, whatsapp, IntPtr.Zero, _win32);
+        var region = WindowTracker.ComputeVisibleRegion(rect, whatsapp, IntPtr.Zero, _win32);
 
-        Assert.True(isOccluded);
+        Assert.Empty(region);
     }
 
     [Fact]
-    public void IsOccludedAtCenter_SkipsOverlayWindowAndChecksNextWindowDown()
+    public void ComputeVisibleRegion_ReturnsPartialRect_WhenRightHalfCovered()
     {
         var whatsapp = new IntPtr(10);
-        var overlay = new IntPtr(20);
-        var overlayChild = new IntPtr(21);
-        var rect = new RECT { Left = 0, Top = 0, Right = 100, Bottom = 100 };
+        var chrome   = new IntPtr(20);
+        var whatsappRect = new RECT { Left = 0, Top = 0, Right = 100, Bottom = 100 };
+        var coveringRect = new RECT { Left = 50, Top = 0, Right = 100, Bottom = 100 };
 
-        _win32.WindowFromPoint(Arg.Any<POINT>()).Returns(overlayChild);
+        _win32.GetRootWindow(whatsapp).Returns(whatsapp);
+        _win32.GetPreviousWindow(whatsapp).Returns(chrome);
+        _win32.GetPreviousWindow(chrome).Returns(IntPtr.Zero);
+        _win32.IsWindowVisible(chrome).Returns(true);
+        _win32.IsIconic(chrome).Returns(false);
+        RECT dummy = default;
+        _win32.GetWindowRect(chrome, out dummy)
+              .Returns(x => { x[1] = coveringRect; return true; });
+
+        var region = WindowTracker.ComputeVisibleRegion(whatsappRect, whatsapp, IntPtr.Zero, _win32);
+
+        // Visible: left half (0,0,50,100)
+        Assert.Single(region);
+        Assert.Equal(0,   region[0].Left);
+        Assert.Equal(0,   region[0].Top);
+        Assert.Equal(50,  region[0].Right);
+        Assert.Equal(100, region[0].Bottom);
+    }
+
+    [Fact]
+    public void ComputeVisibleRegion_ReturnsLShape_WhenTopRightCornerCovered()
+    {
+        var whatsapp     = new IntPtr(10);
+        var chrome       = new IntPtr(20);
+        var whatsappRect = new RECT { Left = 0, Top = 0, Right = 100, Bottom = 100 };
+        var coveringRect = new RECT { Left = 50, Top = 0, Right = 100, Bottom = 50 }; // top-right quadrant
+
+        _win32.GetRootWindow(whatsapp).Returns(whatsapp);
+        _win32.GetPreviousWindow(whatsapp).Returns(chrome);
+        _win32.GetPreviousWindow(chrome).Returns(IntPtr.Zero);
+        _win32.IsWindowVisible(chrome).Returns(true);
+        _win32.IsIconic(chrome).Returns(false);
+        RECT dummy = default;
+        _win32.GetWindowRect(chrome, out dummy)
+              .Returns(x => { x[1] = coveringRect; return true; });
+
+        var region = WindowTracker.ComputeVisibleRegion(whatsappRect, whatsapp, IntPtr.Zero, _win32);
+
+        // L-shape: bottom band (0,50,100,100) + top-left (0,0,50,50)
+        Assert.Equal(2, region.Count);
+        Assert.Contains(region, r => r.Left == 0  && r.Top == 50 && r.Right == 100 && r.Bottom == 100);
+        Assert.Contains(region, r => r.Left == 0  && r.Top == 0  && r.Right == 50  && r.Bottom == 50);
+    }
+
+    [Fact]
+    public void ComputeVisibleRegion_SkipsOverlayHwnd()
+    {
+        var whatsapp = new IntPtr(10);
+        var overlay  = new IntPtr(20);
+        var rect     = new RECT { Left = 0, Top = 0, Right = 100, Bottom = 100 };
+
         _win32.GetRootWindow(whatsapp).Returns(whatsapp);
         _win32.GetRootWindow(overlay).Returns(overlay);
-        _win32.GetRootWindow(overlayChild).Returns(overlay);
-        _win32.GetNextWindow(overlay).Returns(whatsapp);
+        _win32.GetPreviousWindow(whatsapp).Returns(overlay); // overlay is directly above
+        _win32.GetPreviousWindow(overlay).Returns(IntPtr.Zero);
 
-        var isOccluded = WindowTracker.IsOccludedAtCenter(rect, whatsapp, overlay, _win32);
+        var region = WindowTracker.ComputeVisibleRegion(rect, whatsapp, overlay, _win32);
 
-        Assert.False(isOccluded);
+        // Overlay should be skipped — full region visible
+        Assert.Single(region);
     }
 
     [Fact]
-    public async Task OcclusionChanged_FiresOnlyOnOcclusionTransitions()
+    public void ComputeVisibleRegion_SkipsMinimizedCoveringWindows()
     {
-        var hwnd = new IntPtr(42);
-        var chrome = new IntPtr(99);
-        var topWindow = hwnd;
-        var occlusionEvents = new List<bool>();
-        SetupHandleAndRect(hwnd, new RECT { Left = 0, Top = 0, Right = 100, Bottom = 100 });
+        var whatsapp = new IntPtr(10);
+        var chrome   = new IntPtr(20);
+        var rect     = new RECT { Left = 0, Top = 0, Right = 100, Bottom = 100 };
 
-        _win32.WindowFromPoint(Arg.Any<POINT>()).Returns(_ => topWindow);
+        _win32.GetRootWindow(whatsapp).Returns(whatsapp);
+        _win32.GetPreviousWindow(whatsapp).Returns(chrome);
+        _win32.GetPreviousWindow(chrome).Returns(IntPtr.Zero);
+        _win32.IsWindowVisible(chrome).Returns(true);
+        _win32.IsIconic(chrome).Returns(true); // minimized → should be skipped
+
+        var region = WindowTracker.ComputeVisibleRegion(rect, whatsapp, IntPtr.Zero, _win32);
+
+        Assert.Single(region); // still fully visible
+    }
+
+    [Fact]
+    public void ComputeVisibleRegion_SkipsInvisibleCoveringWindows()
+    {
+        var whatsapp = new IntPtr(10);
+        var chrome   = new IntPtr(20);
+        var rect     = new RECT { Left = 0, Top = 0, Right = 100, Bottom = 100 };
+
+        _win32.GetRootWindow(whatsapp).Returns(whatsapp);
+        _win32.GetPreviousWindow(whatsapp).Returns(chrome);
+        _win32.GetPreviousWindow(chrome).Returns(IntPtr.Zero);
+        _win32.IsWindowVisible(chrome).Returns(false); // invisible → should be skipped
+
+        var region = WindowTracker.ComputeVisibleRegion(rect, whatsapp, IntPtr.Zero, _win32);
+
+        Assert.Single(region); // still fully visible
+    }
+
+    [Fact]
+    public void ComputeVisibleRegion_SkipsSameProcessWindows()
+    {
+        // WhatsApp's own internal HWNDs (e.g. InputNonClientPointerSource) sit above
+        // the main HWND in Z-order and cover the title bar area — they must be ignored.
+        var whatsapp = new IntPtr(10);
+        var internalHwnd = new IntPtr(11); // same process as WhatsApp
+        var rect = new RECT { Left = 0, Top = 0, Right = 100, Bottom = 100 };
+
+        _win32.GetRootWindow(whatsapp).Returns(whatsapp);
+        _win32.GetPreviousWindow(whatsapp).Returns(internalHwnd);
+        _win32.GetPreviousWindow(internalHwnd).Returns(IntPtr.Zero);
+        _win32.GetWindowProcessId(whatsapp).Returns(42u);
+        _win32.GetWindowProcessId(internalHwnd).Returns(42u); // same PID → skip
+        _win32.IsWindowVisible(internalHwnd).Returns(true);
+        _win32.IsIconic(internalHwnd).Returns(false);
+        RECT dummy = default;
+        _win32.GetWindowRect(internalHwnd, out dummy)
+              .Returns(x => { x[1] = rect; return true; }); // fully covers
+
+        var region = WindowTracker.ComputeVisibleRegion(rect, whatsapp, IntPtr.Zero, _win32);
+
+        Assert.Single(region); // internal HWND skipped → still fully visible
+    }
+
+    [Fact]
+    public void ComputeVisibleRegion_SkipsToolWindows()
+    {
+        // System UI windows (taskbar strips, tray popups) have WS_EX_TOOLWINDOW and
+        // should not be counted as covering apps even when they overlap WhatsApp.
+        var whatsapp = new IntPtr(10);
+        var taskbarStrip = new IntPtr(20);
+        var rect = new RECT { Left = 0, Top = 0, Right = 100, Bottom = 100 };
+
+        _win32.GetRootWindow(whatsapp).Returns(whatsapp);
+        _win32.GetPreviousWindow(whatsapp).Returns(taskbarStrip);
+        _win32.GetPreviousWindow(taskbarStrip).Returns(IntPtr.Zero);
+        _win32.GetWindowProcessId(whatsapp).Returns(1u);
+        _win32.GetWindowProcessId(taskbarStrip).Returns(2u); // different PID
+        _win32.GetWindowExStyle(taskbarStrip).Returns(0x80); // WS_EX_TOOLWINDOW
+        _win32.IsWindowVisible(taskbarStrip).Returns(true);
+        _win32.IsIconic(taskbarStrip).Returns(false);
+        RECT dummy = default;
+        _win32.GetWindowRect(taskbarStrip, out dummy)
+              .Returns(x => { x[1] = rect; return true; }); // fully covers
+
+        var region = WindowTracker.ComputeVisibleRegion(rect, whatsapp, IntPtr.Zero, _win32);
+
+        Assert.Single(region); // toolwindow skipped → still fully visible
+    }
+
+    [Fact]
+    public async Task VisibleRegionChanged_FiresOnlyOnRegionTransitions()
+    {
+        var hwnd   = new IntPtr(42);
+        var chrome = new IntPtr(99);
+        var whatsappRect = new RECT { Left = 0, Top = 0, Right = 100, Bottom = 100 };
+        var regionEvents = new List<IReadOnlyList<Rect>>();
+        SetupHandleAndRect(hwnd, whatsappRect);
+
         _win32.GetRootWindow(hwnd).Returns(hwnd);
-        _win32.GetRootWindow(chrome).Returns(chrome);
+
+        // Initially nothing is above WhatsApp
+        var topAbove = IntPtr.Zero;
+        _win32.GetPreviousWindow(hwnd).Returns(_ => topAbove);
+        _win32.GetPreviousWindow(chrome).Returns(IntPtr.Zero);
+        _win32.IsWindowVisible(chrome).Returns(true);
+        _win32.IsIconic(chrome).Returns(false);
+        RECT coverRect = new RECT { Left = 0, Top = 0, Right = 100, Bottom = 100 };
+        RECT dummy = default;
+        _win32.GetWindowRect(chrome, out dummy)
+              .Returns(x => { x[1] = coverRect; return true; });
 
         _tracker = CreateTracker();
-        _tracker.OcclusionChanged += (_, isOccluded) => occlusionEvents.Add(isOccluded);
+        _tracker.VisibleRegionChanged += (_, r) => regionEvents.Add(r);
 
         _tracker.Start();
-        await Task.Delay(60);
+        await Task.Delay(60); // sees full region
 
-        topWindow = chrome;
-        await Task.Delay(60);
+        topAbove = chrome; // chrome now above WhatsApp
+        await Task.Delay(60); // sees empty region → fires
 
-        topWindow = hwnd;
-        await Task.Delay(60);
+        topAbove = IntPtr.Zero; // chrome gone
+        await Task.Delay(60); // sees full region again → fires
 
         _tracker.Stop();
 
-        Assert.Equal(new[] { true, false }, occlusionEvents);
+        // Three transitions: initial detection (null → full), occlusion (full → empty), clear (empty → full).
+        Assert.Equal(3, regionEvents.Count);
+        Assert.Single(regionEvents[0]);  // initial: window first seen, fully visible
+        Assert.Empty(regionEvents[1]);   // chrome appears → fully occluded
+        Assert.Single(regionEvents[2]);  // chrome gone → fully visible again
     }
 
     [Fact]
