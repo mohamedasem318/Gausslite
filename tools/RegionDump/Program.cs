@@ -14,6 +14,68 @@ using WinRT;
 
 Console.WriteLine("RegionDump placeholder");
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+static IntPtr FindWhatsAppWindow()
+{
+    var win32 = new Win32Api();
+    var profile = new WhatsAppProfile(win32);
+    return profile.FindWindowHandle();
+}
+
+static GraphicsCaptureItem? CreateCaptureItem(IntPtr hwnd)
+{
+    if (!GraphicsCaptureSession.IsSupported())
+    {
+        Console.Error.WriteLine("Windows.Graphics.Capture is not supported on this system.");
+        return null;
+    }
+
+    const string runtimeClass = "Windows.Graphics.Capture.GraphicsCaptureItem";
+    int hr = NativeMethods.WindowsCreateString(
+        runtimeClass, (uint)runtimeClass.Length, out IntPtr hstring);
+    if (hr < 0)
+    {
+        Console.Error.WriteLine($"WindowsCreateString failed: 0x{hr:X8}");
+        return null;
+    }
+
+    IntPtr factoryPtr = IntPtr.Zero;
+    IntPtr itemAbi    = IntPtr.Zero;
+    try
+    {
+        var interopIid = NativeMethods.IID_IGraphicsCaptureItemInterop;
+        hr = NativeMethods.RoGetActivationFactory(hstring, ref interopIid, out factoryPtr);
+        if (hr < 0)
+        {
+            Console.Error.WriteLine($"RoGetActivationFactory failed: 0x{hr:X8}");
+            return null;
+        }
+
+        var interop = (IGraphicsCaptureItemInterop)Marshal.GetObjectForIUnknown(factoryPtr);
+        var itemIid  = NativeMethods.IID_IGraphicsCaptureItem;
+        hr = interop.CreateForWindow(hwnd, ref itemIid, out itemAbi);
+        if (hr < 0)
+        {
+            Console.Error.WriteLine($"CreateForWindow failed: 0x{hr:X8}");
+            return null;
+        }
+
+        return MarshalInterface<GraphicsCaptureItem>.FromAbi(itemAbi);
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"CreateCaptureItem error: {ex.Message}");
+        return null;
+    }
+    finally
+    {
+        if (itemAbi    != IntPtr.Zero) Marshal.Release(itemAbi);
+        if (factoryPtr != IntPtr.Zero) Marshal.Release(factoryPtr);
+        NativeMethods.WindowsDeleteString(hstring);
+    }
+}
+
 // ── COM interfaces ────────────────────────────────────────────────────────────
 
 [ComImport]
