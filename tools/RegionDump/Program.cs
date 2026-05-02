@@ -76,6 +76,87 @@ static GraphicsCaptureItem? CreateCaptureItem(IntPtr hwnd)
     }
 }
 
+static IDirect3DDevice CreateD3DDevice()
+{
+    int hr = NativeMethods.D3D11CreateDevice(
+        IntPtr.Zero,
+        1,              // D3D_DRIVER_TYPE_HARDWARE
+        IntPtr.Zero,
+        0,
+        IntPtr.Zero,
+        0,
+        7,              // D3D11_SDK_VERSION
+        out IntPtr d3dDevicePtr,
+        IntPtr.Zero,
+        out IntPtr deviceContext);
+    Marshal.ThrowExceptionForHR(hr);
+
+    try
+    {
+        var dxgiIid = NativeMethods.IID_IDXGIDevice;
+        hr = Marshal.QueryInterface(d3dDevicePtr, ref dxgiIid, out IntPtr dxgiDevicePtr);
+        Marshal.ThrowExceptionForHR(hr);
+        try
+        {
+            return new WinRTCaptureInterop().CreateDirect3DDevice(dxgiDevicePtr);
+        }
+        finally
+        {
+            Marshal.Release(dxgiDevicePtr);
+        }
+    }
+    finally
+    {
+        if (deviceContext != IntPtr.Zero) Marshal.Release(deviceContext);
+        Marshal.Release(d3dDevicePtr);
+    }
+}
+
+static (byte[] pixels, int width, int height, int stride)? CaptureOneFrame(
+    GraphicsCaptureItem item, IDirect3DDevice device)
+{
+    var engine = new CaptureEngine(new WinRTCaptureInterop(), device);
+    var gate   = new System.Threading.ManualResetEventSlim(false);
+    (byte[] pixels, int width, int height, int stride)? result = null;
+
+    engine.FrameArrived += (_, frame) =>
+    {
+        if (result != null) return;
+
+        // GPU→CPU copy must happen while the surface is still valid.
+        // CaptureEngine disposes the frame immediately after this handler returns,
+        // so we cannot store frame.Frame.Surface and use it later.
+        var softBitmap = SoftwareBitmap
+            .CreateCopyFromSurfaceAsync(frame.Frame.Surface)
+            .AsTask().GetAwaiter().GetResult();
+
+        using var buffer    = softBitmap.LockBuffer(BitmapBufferAccessMode.Read);
+        var desc            = buffer.GetPlaneDescription(0);
+        using var reference = buffer.CreateReference();
+        unsafe
+        {
+            var access = (IMemoryBufferByteAccess)reference;
+            access.GetBuffer(out byte* ptr, out uint capacity);
+            var pixels = new byte[capacity];
+            Marshal.Copy((IntPtr)ptr, pixels, 0, (int)capacity);
+            result = (pixels, desc.Width, desc.Height, desc.Stride);
+        }
+        gate.Set();
+    };
+
+    engine.Start(item);
+    bool arrived = gate.Wait(TimeSpan.FromSeconds(2));
+    engine.Stop();   // always dispose the capture session, including on timeout
+
+    if (!arrived)
+    {
+        Console.Error.WriteLine(
+            "Capture timed out after 2s — WhatsApp window may be minimized or off-screen");
+        return null;
+    }
+    return result!.Value;
+}
+
 // ── COM interfaces ────────────────────────────────────────────────────────────
 
 [ComImport]
