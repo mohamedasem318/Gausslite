@@ -27,4 +27,14 @@ public interface IBlurPipeline : IDisposable
     /// The caller must present the result immediately and not retain it past the next <see cref="BlurFrame"/> call.
     /// </summary>
     IBlurRenderTarget? TryRenderCurrentFrame();
+
+    /// <summary>
+    /// Reads the most recently cached input frame as a CPU-side BGRA byte buffer.
+    /// Returns <see langword="false"/> if no frame has been captured yet or if the GPU readback fails.
+    /// <para>
+    /// Must be called from the WPF UI thread.  Map/Unmap on the immediate context is acceptable
+    /// at this cadence (once on first frame, then on each WhatsApp resize).
+    /// </para>
+    /// </summary>
+    bool TryReadLatestFrameAsBgra(out byte[] bgraPixels, out int width, out int height, out int stride);
 }

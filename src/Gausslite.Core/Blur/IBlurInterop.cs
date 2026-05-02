@@ -48,4 +48,25 @@ public interface IBlurInterop
     /// re-render path, before <c>D3DImageBridge.UpdateD3DImage</c> accesses the surface.
     /// </summary>
     void FlushDevice(IBlurCanvasDevice canvasDevice);
+
+    /// <summary>
+    /// Allocates a D3D11 staging texture (D3D11_USAGE_STAGING / D3D11_CPU_ACCESS_READ) sized
+    /// to <paramref name="width"/>×<paramref name="height"/> pixels.  The caller is responsible
+    /// for disposal; <see cref="BlurPipeline"/> reuses the instance across calls.
+    /// </summary>
+    IBlurStagingTexture CreateStagingTexture(IBlurCanvasDevice canvasDevice, float width, float height);
+
+    /// <summary>
+    /// Copies <paramref name="cachedFrame"/> to <paramref name="staging"/> via CopyResource,
+    /// then Maps the staging texture and returns the raw BGRA pixel bytes.
+    /// Flushes pending GPU commands before the copy to avoid stale data.
+    /// </summary>
+    bool TryReadBgra(
+        IBlurCanvasDevice canvasDevice,
+        ICachedFrame cachedFrame,
+        IBlurStagingTexture staging,
+        out byte[] bgraPixels,
+        out int width,
+        out int height,
+        out int stride);
 }

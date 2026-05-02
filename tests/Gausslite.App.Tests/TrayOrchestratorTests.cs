@@ -5,6 +5,7 @@ using Gausslite.App.Orchestration;
 using Gausslite.Core.AppProfiles;
 using Gausslite.Core.Blur;
 using Gausslite.Core.Capture;
+using Gausslite.Core.Detection;
 using Gausslite.Core.WindowTracking;
 using Gausslite.Overlay;
 using Windows.Graphics.Capture;
@@ -21,6 +22,20 @@ public sealed class TrayOrchestratorTests
     private readonly IHotkeyService _hotkeyService = Substitute.For<IHotkeyService>();
     private readonly ICaptureItemFactory _captureItemFactory = Substitute.For<ICaptureItemFactory>();
     private readonly IAppProfile _profile = Substitute.For<IAppProfile>();
+    private readonly FixedResultDetector _regionDetector = new();
+
+    // Avoids NSubstitute limitations with ReadOnlySpan<byte> parameters.
+    private sealed class FixedResultDetector : IRegionDetector
+    {
+        public RegionDetectionResult Result { get; set; } =
+            new RegionDetectionResult { Succeeded = true, DetectedRailSide = RailSide.Left };
+        public int CallCount { get; private set; }
+        public RegionDetectionResult Detect(ReadOnlySpan<byte> bgraPixels, int w, int h, int stride)
+        {
+            CallCount++;
+            return Result;
+        }
+    }
 
     private TrayOrchestrator CreateSut() => new(
         _windowTracker,
@@ -29,7 +44,8 @@ public sealed class TrayOrchestratorTests
         _overlayWindow,
         _hotkeyService,
         _captureItemFactory,
-        _profile);
+        _profile,
+        _regionDetector);
 
     private TrayOrchestrator CreateSutWithInlineDispatch() => new(
         _windowTracker,
@@ -39,6 +55,7 @@ public sealed class TrayOrchestratorTests
         _hotkeyService,
         _captureItemFactory,
         _profile,
+        _regionDetector,
         (_, action, _) => action(),
         (_, action) => action());
 
@@ -551,5 +568,101 @@ public sealed class TrayOrchestratorTests
         sut.SetScope(BlurRegionScope.Both);
 
         Assert.Equal(BlurRegionScope.Both, sut.CurrentScope);
+    }
+
+    // ── Region detection ─────────────────────────────────────────────────────
+
+    private void SetupReadbackSuccess(int width = 800, int height = 600)
+    {
+        var fakePixels = new byte[width * height * 4];
+        _blurPipeline
+            .TryReadLatestFrameAsBgra(out Arg.Any<byte[]>(), out Arg.Any<int>(), out Arg.Any<int>(), out Arg.Any<int>())
+            .Returns(x => { x[0] = fakePixels; x[1] = width; x[2] = height; x[3] = width * 4; return true; });
+    }
+
+    private void SetupReadbackFailure()
+    {
+        _blurPipeline
+            .TryReadLatestFrameAsBgra(out Arg.Any<byte[]>(), out Arg.Any<int>(), out Arg.Any<int>(), out Arg.Any<int>())
+            .Returns(false);
+    }
+
+    private ICaptureFrame MakeCaptureFrame(int width = 800, int height = 600)
+    {
+        var rt = Substitute.For<IBlurRenderTarget>();
+        _blurPipeline.BlurFrame(Arg.Any<ICaptureFrame>()).Returns(rt);
+
+        var frame = Substitute.For<ICaptureFrame>();
+        frame.ContentSize.Returns(new Windows.Graphics.SizeInt32 { Width = width, Height = height });
+        return frame;
+    }
+
+    [Fact]
+    public void FirstFrame_RunsDetectionAndStoresResult()
+    {
+        // CreateSutWithInlineDispatch makes both background and UI dispatches synchronous,
+        // so the detection dispatch from OnFrameArrived runs inline on the same thread.
+        SetupWhatsAppFound();
+        SetupReadbackSuccess();
+        var expectedResult = new RegionDetectionResult { Succeeded = true, DetectedRailSide = RailSide.Left };
+        _regionDetector.Result = expectedResult;
+
+        using var sut = CreateSutWithInlineDispatch();
+        sut.EnableBlur();
+
+        _captureEngine.FrameArrived += Raise.Event<EventHandler<ICaptureFrame>>(this, MakeCaptureFrame());
+
+        Assert.NotNull(sut.LastDetectionResult);
+        Assert.Equal(1, _regionDetector.CallCount);
+        Assert.Equal(expectedResult.DetectedRailSide, sut.LastDetectionResult!.Value.DetectedRailSide);
+    }
+
+    [Fact]
+    public void FirstFrame_DetectionOnlyRunsOnce_SecondFrameDoesNotRerunDetect()
+    {
+        SetupWhatsAppFound();
+        SetupReadbackSuccess();
+
+        using var sut = CreateSutWithInlineDispatch();
+        sut.EnableBlur();
+
+        _captureEngine.FrameArrived += Raise.Event<EventHandler<ICaptureFrame>>(this, MakeCaptureFrame());
+        _captureEngine.FrameArrived += Raise.Event<EventHandler<ICaptureFrame>>(this, MakeCaptureFrame());
+
+        Assert.Equal(1, _regionDetector.CallCount);
+    }
+
+    [Fact]
+    public void BoundsChanged_RunsDetectionAgain()
+    {
+        SetupWhatsAppFound();
+        SetupReadbackSuccess();
+
+        using var sut = CreateSutWithInlineDispatch();
+        sut.EnableBlur();
+
+        // First-frame detection
+        _captureEngine.FrameArrived += Raise.Event<EventHandler<ICaptureFrame>>(this, MakeCaptureFrame());
+        int callsAfterFirstFrame = _regionDetector.CallCount;
+
+        // BoundsChanged should trigger another detection
+        _windowTracker.BoundsChanged += Raise.Event<EventHandler<Rect>>(this, new Rect(0, 0, 800, 600));
+
+        Assert.Equal(callsAfterFirstFrame + 1, _regionDetector.CallCount);
+    }
+
+    [Fact]
+    public void Detection_SkippedWhenReadbackFails_LastResultStaysNull()
+    {
+        SetupWhatsAppFound();
+        SetupReadbackFailure();
+
+        using var sut = CreateSutWithInlineDispatch();
+        sut.EnableBlur();
+
+        _captureEngine.FrameArrived += Raise.Event<EventHandler<ICaptureFrame>>(this, MakeCaptureFrame());
+
+        Assert.Null(sut.LastDetectionResult);
+        Assert.Equal(0, _regionDetector.CallCount);
     }
 }

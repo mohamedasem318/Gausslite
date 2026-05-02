@@ -6,6 +6,238 @@
 
 ## Session history
 
+### 2026-05-03 — E_NOINTERFACE audit: six sites eliminated across Blur module
+
+**Context.** A previous session fixed one `Marshal.GetObjectForIUnknown + managed-cast` site
+in `Win2DBlurInterop.TryReadBgra` (the IDirect3DSurface-path bug). An integration test was
+added and passed on WARP. Post-fix, production still exhibited `InvalidCastException` in
+`Win2DBlurRenderTarget..ctor` at line 90 — a different site, same root cause.
+
+---
+
+**Bug class.**
+
+Any WinRT object registered via `MarshalInterface<T>.FromAbi` is entered into CsWinRT's
+ComWrappers global instance table keyed by IUnknown identity. `Marshal.GetObjectForIUnknown(ptr)`
+for any pointer sharing that IUnknown returns the registered managed projection, not a raw BCL
+RCW. Casting the managed projection to a private COM interface (not declared in Windows metadata
+— `ID3D11Device`, `IDirect3DDxgiInterfaceAccess`, etc.) fails with `InvalidCastException`
+because the managed projection doesn't implement that type in the .NET type system.
+
+---
+
+**Audit — 6 sites found.**
+
+**Sites A/B/C** — `(IDirect3DDxgiInterfaceAccess)Marshal.GetObjectForIUnknown(dxgiAccessPtr)`:
+
+| Site | File | Method | Line |
+|---|---|---|---|
+| A | `Win2DBlurInterop.cs` | `GetD3D11DevicePtr` | 513 |
+| B | `Win2DBlurRenderTarget.cs` | `GetD3D11DevicePtr` | 149 |
+| C | `Win2DBlurInterop.cs` | `FlushD3D11Context` | 457 |
+
+`dxgiAccessPtr` is obtained by `Marshal.QueryInterface(inspectablePtr, IID_IDirect3DDxgiInterfaceAccess)`
+where `inspectablePtr` is `IWinRTObject.NativeObject.ThisPtr` of a registered `IDirect3DDevice`.
+
+**Work by luck.** In both WARP and production, `IDirect3DDxgiInterfaceAccess` is a COM
+**tear-off** on `IDirect3DDevice` — a separate COM object with a different IUnknown identity
+from the WinRT device wrapper. `GetObjectForIUnknown` doesn't find the registered projection,
+creates a fresh BCL RCW, and the managed cast succeeds via traditional COM QI. Would break if
+Windows changes the implementation.
+
+**Sites D/E/F** — `(ID3D11Device)Marshal.GetObjectForIUnknown(d3d11DevicePtr)`:
+
+| Site | File | Method | Line | Status |
+|---|---|---|---|---|
+| D | `Win2DBlurRenderTarget.cs` | constructor | 90 | **Throwing in production** |
+| E | `Win2DBlurInterop.cs` | `CreateCachedFrame` | 93 | Would throw in production |
+| F | `Win2DBlurInterop.cs` | `CreateStagingTexture` | 182 | Would throw in production |
+
+`d3d11DevicePtr` is the raw `ID3D11Device*` returned by `IDirect3DDxgiInterfaceAccess::GetInterface`.
+
+**Production (hardware GPU):** Windows implements `IDirect3DDevice` via COM aggregation — the
+WinRT wrapper's IUnknown **is** the ID3D11Device's IUnknown. `GetObjectForIUnknown` returns the
+registered CsWinRT `IDirect3DDevice` projection. The managed cast to `ID3D11Device` fails
+(CsWinRT projection doesn't implement this .NET interface type) → `InvalidCastException`.
+
+**WARP (integration test):** The WARP D3D11 device and WinRT wrapper are distinct COM objects
+(no aggregation, different IUnknown). `GetObjectForIUnknown` creates a new BCL RCW, the cast
+succeeds via COM QI. **This is why the previous integration test missed Sites D/E/F.**
+
+---
+
+**Fixes.**
+
+All 6 sites converted to raw vtable dispatch:
+
+- Sites A/B/C: `CallGetInterface(dxgiAccessPtr, in IID_ID3D11Device, out d3d11DevicePtr)` — reads
+  IDirect3DDxgiInterfaceAccess vtable slot 3 directly, bypassing the managed layer entirely.
+
+- Sites D/E/F: `CreateTexture2DRaw(d3d11DevicePtr, ref desc, out texture)` — reads ID3D11Device
+  vtable slot 5 directly.
+
+Both dead `[ComImport]` interface definitions (`IDirect3DDxgiInterfaceAccess`, `ID3D11Device`)
+removed from both files. `Win2DBlurRenderTarget` gained its own `GetInterfaceDelegate`,
+`CreateTexture2DDelegate`, `CallGetInterface`, and `CreateTexture2DRaw` (mirroring the helpers
+that already existed in `Win2DBlurInterop`).
+
+Post-fix grep: zero `GetObjectForIUnknown` call sites in `src/Gausslite.Core/Blur/` (two
+remaining matches are comments explaining why the pattern is absent).
+
+---
+
+**Vtable slot reference (both files).**
+
+| Slot | Object | Method | Used in |
+|---|---|---|---|
+| 3 | `IDirect3DDxgiInterfaceAccess*` | `GetInterface` | `CallGetInterface` |
+| 5 | `ID3D11Device*` | `CreateTexture2D` | `CreateTexture2DRaw` |
+| 40 | `ID3D11Device*` | `GetImmediateContext` | `FlushD3D11Context`, `TryReadBgra` |
+| 111 | `ID3D11DeviceContext*` | `Flush` | `FlushD3D11Context`, `TryReadBgra` |
+| 47 | `ID3D11DeviceContext*` | `CopyResource` | `TryReadBgra` |
+| 14 | `ID3D11DeviceContext*` | `Map` | `TryReadBgra` |
+| 15 | `ID3D11DeviceContext*` | `Unmap` | `TryReadBgra` |
+
+---
+
+**Test fix.**
+
+Added `AllConvertedCallSites_WhileDeviceIsAlive_DoNotThrow` to
+`Win2DBlurInteropIntegrationTests`. Exercises all 6 converted paths in sequence:
+
+1. `CreateRenderTarget` → `Win2DBlurRenderTarget` ctor → Sites B (fixed) + D (fixed)
+2. `CreateCachedFrame` → Site E (fixed) + `MarshalInterface<IDirect3DSurface>.FromAbi`
+3. `CreateStagingTexture` → Site F (fixed)
+4. `FlushDevice` → `FlushD3D11Context` → Site C (fixed)
+5. `TryReadBgra` → previously fixed site (surface path)
+
+All run while `_d3dDevice` (created via `MarshalInterface<IDirect3DDevice>.FromAbi`) is alive.
+Surface path (step 5) catches regression in WARP because IDirect3DSurface's
+IDirect3DDxgiInterfaceAccess shares IUnknown with the registered surface projection.
+Device-path sites D/E/F catch regression only on hardware GPU (WARP doesn't reproduce the
+IUnknown identity collapse for those paths).
+
+---
+
+Smoke test: zero `InvalidCastException` entries, `detection-succeeded` on every trigger
+(first frame + all BoundsChanged), plausible chatList/conversation rects, no exceptions
+from any call site. Scope switch (ChatList → Conversation → Both) logged cleanly.
+
+Test counts: Core 87/87, App 50/50 (x64). Build: 0 errors, 1 pre-existing Win2D AnyCPU warning.
+
+Commit: `fefd970` on branch `v0.2.0-detection-plumbing`.
+
+---
+
+### 2026-05-02 — v0.2.0 Session A: detection plumbing
+
+**Goal.** Wire `WhatsAppRegionDetector` into the live capture path so detection runs on every
+first frame and on every WhatsApp resize. No visual behavior change. Session B will consume
+the results to drive scope-aware blur.
+
+---
+
+**GPU→CPU readback design.**
+
+The existing `BlurPipeline` keeps a `ICachedFrame` (`Win2DCachedFrame`, a Win2D
+`CanvasRenderTarget`) that holds the most recent captured frame for on-demand re-render.
+Reading it back to CPU requires a D3D11 staging texture.
+
+New types:
+- `IBlurStagingTexture` (interface, `float Width/Height + Dispose`) — manages lifetime.
+- `Win2DBlurStagingTexture` (internal) — wraps a raw `ID3D11Texture2D*` created with
+  `D3D11_USAGE_STAGING`, `D3D11_CPU_ACCESS_READ`, zero bind flags. Owns the COM pointer
+  and releases it on `Dispose`.
+
+New `IBlurInterop` methods:
+- `CreateStagingTexture(device, w, h) -> IBlurStagingTexture` — creates the staging
+  texture on the app's shared D3D11 device.
+- `TryReadBgra(device, cachedFrame, staging, out pixels, out w, out h, out stride) -> bool`
+  — gets the immediate context (vtable slot 40), flushes (slot 111) to avoid stale
+  frame data, calls `CopyResource` (slot 47) from source → staging, then `Map` (slot 14) /
+  `Marshal.Copy` / `Unmap` (slot 15). Returns `false` on any HRESULT failure.
+
+Source texture access: `Win2DCachedFrame` now stores an `IDirect3DSurface? Surface` property.
+The creation path in `Win2DBlurInterop.CreateCachedFrame` was changed from
+`new CanvasRenderTarget(device, w, h, 96f)` (Win2D-internal allocation, no surface handle)
+to the explicit D3D11 path (same as `Win2DBlurRenderTarget`): `CreateTexture2D` with
+`BIND_RENDER_TARGET | BIND_SHADER_RESOURCE` (no `MISC_SHARED` needed), QI for `IDXGISurface`,
+`CreateDirect3D11SurfaceFromDXGISurface`, then `CanvasRenderTarget.CreateFromDirect3D11Surface`.
+The stored `IDirect3DSurface` can be QI'd for `IDirect3DDxgiInterfaceAccess →
+GetInterface(IID_ID3D11Texture2D)` to get the source pointer for `CopyResource`.
+
+All vtable-dispatch infrastructure follows the existing `FlushD3D11Context` pattern:
+`[UnmanagedFunctionPointer(StdCall)]` delegates, `Marshal.ReadIntPtr(vtable, slot * IntPtr.Size)`,
+`Marshal.GetDelegateForFunctionPointer`. No new COM imports for `ID3D11DeviceContext` —
+the 47-stub placeholder approach was rejected as load-bearing noise.
+
+`BlurPipeline` lifecycle for `_stagingTexture`:
+- Allocated on first `TryReadLatestFrameAsBgra` call (when `_cachedInputFrame` is non-null).
+- Reused while `Width/Height` match `_cachedInputFrame`.
+- Discarded (null-ed) alongside `_cachedInputFrame` on dimension change in `BlurFrame`.
+- Reallocated on the next `TryReadLatestFrameAsBgra` call after a resize.
+- `Dispose()`d in `BlurPipeline.Dispose()` inside `_cacheLock`.
+
+---
+
+**Detector triggering design.**
+
+`TrayOrchestrator` gains `IRegionDetector _regionDetector` (8th ctor param, public ctor now
+8-arg, internal test ctor now 10-arg). `App.xaml.cs` wires `new WhatsAppRegionDetector()`.
+
+Two trigger points:
+
+1. **First frame** (`OnFrameArrived`, background thread):
+   After `BlurFrame` succeeds and `PresentFrame` is called, an Interlocked one-shot gate
+   (`_detectionDone`, pattern mirrors `_noOutputLogged`) dispatches a UI-thread lambda.
+   The lambda is guarded by `_setupGeneration` (captured on the background thread) so a
+   `TearDownCaptureAndOverlay` that runs before the lambda executes does not write stale
+   layout data into `_lastDetectionResult` for the new session.
+
+2. **Every `BoundsChanged`** (UI-thread body of `OnBoundsChanged`):
+   `RunDetection("OnBoundsChanged")` is called at the end of the dispatch lambda, after
+   overlay has been moved to the new bounds. Runs unconditionally; `TryReadLatestFrameAsBgra`
+   returns `false` before the first frame, producing a logged skip with no result written.
+
+`RunDetection` (UI-thread private helper):
+1. `_blurPipeline.TryReadLatestFrameAsBgra(out pixels, out w, out h, out stride)`
+2. If `false`: log "detection skipped — no frame available".
+3. `var result = _regionDetector.Detect(pixels, w, h, stride)`
+4. `_lastDetectionResult = result`
+5. Log `DetectedRailSide`, `ChatListRect`, `ConversationRect` on success; `FailureReason` on failure.
+
+`_detectionDone` is reset to 0 in `TearDownCaptureAndOverlay` (via `Interlocked.Exchange`)
+so detection re-fires on the first frame of the next session.
+
+`_lastDetectionResult` is `RegionDetectionResult?` (null = never run). Plain assignment —
+written and read on UI thread only. Exposed via `internal RegionDetectionResult? LastDetectionResult`.
+
+---
+
+**Tests.**
+
+`BlurPipelineTests` (6 new):
+- `BeforeAnyFrame_ReturnsFalse` — no `CreateStagingTexture` call.
+- `OnFirstRead_AllocatesStagingTexture` — `CreateStagingTexture` called once.
+- `SameDimensionsTwice_ReusesStagingTexture` — `CreateStagingTexture` called once total.
+- `AfterDimensionChange_ReallocatesStagingTexture` — called once per dimension pair; old staging disposed.
+- `Dispose_DisposeStagingTexture` — staging disposed when pipeline is.
+- `DelegatesToInterop` — `TryReadBgra` called; returned pixels/width/height/stride forwarded.
+
+`TrayOrchestratorTests` (4 new):
+- `FirstFrame_RunsDetectionAndStoresResult`
+- `FirstFrame_DetectionOnlyRunsOnce_SecondFrameDoesNotRerunDetect`
+- `BoundsChanged_RunsDetectionAgain`
+- `Detection_SkippedWhenReadbackFails_LastResultStaysNull`
+
+`FixedResultDetector` inner class: simple `IRegionDetector` implementation that increments a
+counter and returns a configurable result, avoiding NSubstitute limitations with `ReadOnlySpan<byte>`.
+
+Test counts: Core 85/85, App 50/50 (x64 Release). Build: 0 errors, 1 pre-existing Win2D
+AnyCPU warning.
+
+---
+
 ### 2026-05-02 — RTL rail-side detection (issue #30)
 
 **Root cause correction.**

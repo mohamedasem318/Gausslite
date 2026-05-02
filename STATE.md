@@ -12,6 +12,60 @@ definition and CHANGELOG.md for full v0.1.x development history.
 
 ## Last session summary
 
+**2026-05-03 — E_NOINTERFACE audit: six sites eliminated across Blur module (branch v0.2.0-detection-plumbing).**
+
+Full codebase audit of `src/Gausslite.Core/Blur/` for the `Marshal.GetObjectForIUnknown +
+managed-cast` bug class after a previous session's single-site fix left five more live sites.
+
+**6 sites found and fixed.** Sites A/B/C (`GetD3D11DevicePtr` ×2, `FlushD3D11Context`) used
+`(IDirect3DDxgiInterfaceAccess)Marshal.GetObjectForIUnknown(dxgiAccessPtr)` — worked by luck
+because `IDirect3DDxgiInterfaceAccess` is a COM tear-off on `IDirect3DDevice` (different
+IUnknown from the registered WinRT projection). Sites D/E/F (`Win2DBlurRenderTarget` ctor,
+`CreateCachedFrame`, `CreateStagingTexture`) used `(ID3D11Device)Marshal.GetObjectForIUnknown(d3d11DevicePtr)` — throws `InvalidCastException` in production because on a hardware GPU the
+`ID3D11Device*` from `GetInterface` shares IUnknown with the registered CsWinRT IDirect3DDevice
+projection; in WARP the test device keeps them separate so the WARP integration test missed it.
+All 6 sites converted to `CreateTexture2DRaw` (vtable slot 5) and `CallGetInterface` (vtable
+slot 3). Both dead `[ComImport]` interface definitions removed from both files.
+`Win2DBlurRenderTarget` gained its own `GetInterfaceDelegate`, `CreateTexture2DDelegate`,
+`CallGetInterface`, and `CreateTexture2DRaw` helpers.
+
+**Test.** New `AllConvertedCallSites_WhileDeviceIsAlive_DoNotThrow` integration test exercises
+all 6 converted paths while the WinRT IDirect3DDevice and IDirect3DSurface projections are alive
+in the CsWinRT ComWrappers table. Surface path (TryReadBgra) catches regression in WARP;
+device path catches regression on hardware GPU.
+
+**Smoke test.** Zero `InvalidCastException` entries, detection-succeeded on every trigger
+with plausible rects, no exceptions from any call site.
+
+Test counts: Core 87/87, App 50/50 (x64). Build: 0 errors, 1 pre-existing Win2D AnyCPU warning.
+
+---
+
+**2026-05-02 — v0.2.0 Session A: detection plumbing (branch v0.2.0-detection-plumbing).**
+
+Wired `WhatsAppRegionDetector` into the live capture path. Detection only — no clip
+changes, no scope-aware blur, no balloons. Visual behavior is unchanged.
+
+**GPU→CPU readback.** Added `IBlurStagingTexture` / `Win2DBlurStagingTexture` and two new
+`IBlurInterop` methods: `CreateStagingTexture` (D3D11_USAGE_STAGING / D3D11_CPU_ACCESS_READ)
+and `TryReadBgra` (CopyResource + Map/Unmap via vtable-dispatch delegates at slots 47/14/15;
+Flush at 111 before the copy). `BlurPipeline` manages the staging texture's lifecycle
+(allocated on first read, reused on same dimensions, reallocated on resize, disposed with the
+pipeline). `Win2DCachedFrame` creation changed to the explicit D3D11 texture path (same as
+`Win2DBlurRenderTarget`) so the backing `IDirect3DSurface` is available for the QI chain.
+
+**Detector triggering.** `TrayOrchestrator` gains `IRegionDetector` as an 8th constructor
+dependency (wired in `App.xaml.cs` with `new WhatsAppRegionDetector()`). Detection fires on
+the first successfully blurred frame (Interlocked one-shot flag; dispatched to UI thread with
+`_setupGeneration` guard against stale-session writes) and on every `BoundsChanged` event.
+Results are stored in `_lastDetectionResult` (private, `internal` accessor `LastDetectionResult`
+for tests). Logged via `StartupLog.Info` on both success and failure.
+
+**Tests.** 6 new `BlurPipelineTests` (readback lifecycle: first-read allocates, reuse, resize,
+dispose). 4 new `TrayOrchestratorTests` (first-frame detection, second-frame no-op, BoundsChanged,
+readback-fail skip). `FixedResultDetector` helper avoids NSubstitute's `ReadOnlySpan<byte>` limitations.
+Counts: Core 85/85, App 50/50 (x64). Build: 0 errors, 0 warnings.
+
 **2026-05-02 — RTL rail-side detection (issue #30).**
 
 Fixed the LTR-only chat-list assignment bug filed as issue #30.
@@ -54,19 +108,16 @@ WGC capture border, TFM bump to 22621)** — see HISTORY.md for full notes.
 
 ## Next up
 
-**v0.2.0 — "The right regions"** remaining items. `IAppProfile`, blur-intensity presets,
-AddDirtyRect + InvalidateVisual repaint improvements, region scope submenu scaffold,
-edge-fade fix, pixel-region occlusion clipping, and the region detector module are all done.
+**v0.2.0 Session B — consume detection results.**
 
-Pick one for the next session:
+Detection now runs and results are stored. Session B consumes `_lastDetectionResult` to drive:
+- `OverlayWindow.SetClip` / `ApplyRegionClip` — scope-aware blur (chat list, conversation, both)
+- Coordinate-space conversion utilities (frame-pixel rects → DIP overlay-local rects)
+- Balloon or log notification when detection fails on a production frame
+- `RegionDump` annotation update (optional tidy)
 
-v0.2.0 remaining work (no required order):
-
-- Smoke test on 3 different WhatsApp Desktop layouts (default, narrow, wide) — verifies
-  the v0.2.0 features that ARE wired (occlusion clipping, intensity presets, edge-fade fix).
-  Does not require region detection to be wired.
-- Wire RegionDetector into BlurPipeline / OverlayWindow / tray submenu — issue #30
-  (RTL assignment) is now resolved; wiring is unblocked.
+All pre-existing v0.2.0 work (occlusion clipping, intensity presets, edge-fade fix, region scope
+submenu scaffold) remains working and unchanged.
 
 ## Blockers
 
@@ -75,6 +126,16 @@ None.
 ## Recent decisions
 
 (See `PLAN.md` Decisions Log for the full history.)
+
+- **2026-05-03 — Vtable-only rule for private COM interfaces in the Blur module.**
+  `Marshal.GetObjectForIUnknown + managed cast` is banned for any private COM interface
+  (`ID3D11Device`, `IDirect3DDxgiInterfaceAccess`, `ID3D11Texture2D`, etc.) in
+  `src/Gausslite.Core/Blur/`. These interfaces are not in Windows metadata; CsWinRT does
+  not project them, but `GetObjectForIUnknown` can return a CsWinRT projection if the native
+  pointer happens to share IUnknown with a registered WinRT object — producing an
+  `InvalidCastException` that is timing/hardware-dependent and not reliably caught in WARP
+  tests. All access must use raw vtable dispatch. Grep enforcement: zero
+  `GetObjectForIUnknown` call sites remain in `src/Gausslite.Core/Blur/`.
 
 - **2026-05-02 — Region detector wiring deferred; issue #30 resolved.**
   The detector was originally wiring-deferred because the chat-list assignment was
