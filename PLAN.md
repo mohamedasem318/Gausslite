@@ -255,6 +255,21 @@ Append-only. One line per decision with date and rationale.
 - 2026-04-30: Renamed project to Gausslite. Single capital G. Rationale:
   portmanteau of Gaussian + gaslighting, cleaner branding, drops the
   descriptive WhatsApp prefix.
+- 2026-05-02: Dropped the UIA path from RegionDetector; ship CV-only.
+  Original v0.2.0 milestone spec read "RegionDetector identifies chat list &
+  conversation rects via UIA, with a computer-vision fallback if UIA fails."
+  `tools/UiaDump` recon proved WhatsApp Desktop is a WebView2 shell — the UIA
+  tree stops at the WebView2 boundary and chat content is entirely invisible to
+  UIA on the current build. There is no partial-UIA scenario; the fallback path
+  would be the only path. Dead-code dual paths with no tested UIA branch are
+  not worth shipping. `WhatsAppRegionDetector` is CV-only.
+- 2026-05-02: Region detector wiring deferred; tray "Blur region" submenu
+  remains a no-op for now. The detector works correctly on the vertical divider
+  but the heuristic that assigns which rect is chat-list and which is
+  conversation (narrower side = chat list) fails in wide-mode layouts where the
+  conversation pane is the wider one. Filed as issue #30 with a proposed fix
+  (horizontal-edge density analysis). Shipping region-aware blur with a broken
+  heuristic would mis-blur the wrong pane; deferring wiring is the right call.
 
 ## Per-session checklist
 
