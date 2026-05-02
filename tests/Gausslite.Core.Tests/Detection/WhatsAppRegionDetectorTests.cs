@@ -42,9 +42,10 @@ public sealed class WhatsAppRegionDetectorTests
         Assert.Equal(new Rect(300, 0, 980, H), result.ConversationRect);
     }
 
-    // Test 2: RTL-like layout — narrow chat list on the right, wide conversation on the left.
+    // Test 2: Divider right of centre (wide chat list) — WhatsApp is LTR so the
+    // left panel is always the chat list, regardless of which side is narrower.
     [Fact]
-    public void Detect_RtlLayout_ChatListOnRight()
+    public void Detect_DividerRightOfCenter_ChatListIsAlwaysLeftPanel()
     {
         const int W = 1280, H = 800, Stride = W * 4;
         var frame = BuildFrame(W, H, Stride, (x, _) =>
@@ -54,8 +55,8 @@ public sealed class WhatsAppRegionDetectorTests
         var result = _detector.Detect(frame, W, H, Stride);
 
         Assert.True(result.Succeeded);
-        Assert.Equal(new Rect(980, 0, 300, H), result.ChatListRect);
-        Assert.Equal(new Rect(0,   0, 980, H), result.ConversationRect);
+        Assert.Equal(new Rect(0,   0, 980, H), result.ChatListRect);
+        Assert.Equal(new Rect(980, 0, 300, H), result.ConversationRect);
     }
 
     // Test 3: All pixels the same colour — no divider to find.

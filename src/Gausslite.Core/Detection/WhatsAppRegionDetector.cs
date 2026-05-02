@@ -68,20 +68,9 @@ public sealed class WhatsAppRegionDetector : IRegionDetector
             return Fail("no strong edge found");
         }
 
-        int leftWidth  = bestX;
-        int rightWidth = frameWidth - bestX;
-
-        Rect chatListRect, conversationRect;
-        if (leftWidth <= rightWidth)
-        {
-            chatListRect     = new Rect(0,      0, leftWidth,  frameHeight);
-            conversationRect = new Rect(bestX,  0, rightWidth, frameHeight);
-        }
-        else
-        {
-            chatListRect     = new Rect(bestX,  0, rightWidth, frameHeight);
-            conversationRect = new Rect(0,      0, leftWidth,  frameHeight);
-        }
+        // WhatsApp Desktop is LTR: the chat list is always the left panel.
+        var chatListRect     = new Rect(0,      0, bestX,              frameHeight);
+        var conversationRect = new Rect(bestX,  0, frameWidth - bestX, frameHeight);
 
         return new RegionDetectionResult
         {
