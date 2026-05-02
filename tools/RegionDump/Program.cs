@@ -148,19 +148,51 @@ static IDirect3DDevice CreateD3DDevice()
 static (byte[] pixels, int width, int height, int stride)? CaptureOneFrame(
     GraphicsCaptureItem item, IDirect3DDevice device)
 {
-    var engine = new CaptureEngine(new WinRTCaptureInterop(), device);
-    var gate   = new System.Threading.ManualResetEventSlim(false);
-    (byte[] pixels, int width, int height, int stride)? result = null;
+    // Use ICaptureInterop directly (not CaptureEngine) so we can own the frame
+    // reference and do the SoftwareBitmap GPU→CPU readback on the calling thread
+    // rather than inside the FrameArrived callback.
+    //
+    // Why: CaptureEngine disposes the frame in its own callback after Invoke()
+    // returns, so doing SoftwareBitmap.CreateCopyFromSurfaceAsync inside the
+    // callback and blocking it with .GetResult() deadlocks — the WinRT async
+    // completion needs a free thread, but the callback thread is blocked.
+    // With this approach the handler just signals; readback runs on the caller.
+    var interop  = new WinRTCaptureInterop();
+    var pool     = interop.CreateFreeThreadedFramePool(device, item);
+    var session  = interop.CreateSession(pool, item);
+    session.IsBorderRequired = false;
 
-    engine.FrameArrived += (_, frame) =>
+    ICaptureFrame? captured = null;
+    var gate = new System.Threading.ManualResetEventSlim(false);
+
+    pool.FrameArrived += (_, _) =>
     {
-        if (result != null) return;
+        if (captured != null) return;
+        var frame = pool.TryGetNextFrame();
+        if (frame is null) return;
+        captured = frame;  // take ownership; caller disposes
+        gate.Set();
+    };
 
-        // GPU→CPU copy must happen while the surface is still valid.
-        // CaptureEngine disposes the frame immediately after this handler returns,
-        // so we cannot store frame.Frame.Surface and use it later.
+    session.StartCapture();
+    bool arrived = gate.Wait(TimeSpan.FromSeconds(2));
+    session.Dispose();  // stop capture; always runs, even on timeout
+
+    if (!arrived)
+    {
+        pool.Dispose();
+        Console.Error.WriteLine(
+            "Capture timed out after 2s — WhatsApp window may be minimized or off-screen");
+        return null;
+    }
+
+    // Readback on the calling (main) thread — MTA, no sync context.
+    // SoftwareBitmap.CreateCopyFromSurfaceAsync completes on a free thread-pool
+    // thread; the main thread's .GetResult() unblocks when it does.
+    try
+    {
         var softBitmap = SoftwareBitmap
-            .CreateCopyFromSurfaceAsync(frame.Frame.Surface)
+            .CreateCopyFromSurfaceAsync(captured!.Frame.Surface)
             .AsTask().GetAwaiter().GetResult();
 
         using var buffer    = softBitmap.LockBuffer(BitmapBufferAccessMode.Read);
@@ -172,22 +204,14 @@ static (byte[] pixels, int width, int height, int stride)? CaptureOneFrame(
             access.GetBuffer(out byte* ptr, out uint capacity);
             var pixels = new byte[capacity];
             Marshal.Copy((IntPtr)ptr, pixels, 0, (int)capacity);
-            result = (pixels, desc.Width, desc.Height, desc.Stride);
+            return (pixels, desc.Width, desc.Height, desc.Stride);
         }
-        gate.Set();
-    };
-
-    engine.Start(item);
-    bool arrived = gate.Wait(TimeSpan.FromSeconds(2));
-    engine.Stop();   // always dispose the capture session, including on timeout
-
-    if (!arrived)
-    {
-        Console.Error.WriteLine(
-            "Capture timed out after 2s — WhatsApp window may be minimized or off-screen");
-        return null;
     }
-    return result!.Value;
+    finally
+    {
+        captured?.Dispose();
+        pool.Dispose();
+    }
 }
 
 static void SaveRawPng(byte[] pixels, int width, int height, int stride, string path)
