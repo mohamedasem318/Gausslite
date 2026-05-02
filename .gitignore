@@ -65,3 +65,6 @@ tools/UiaDump/*.log
 
 # RegionDump outputs — may contain WhatsApp message content; never commit
 region-dump-*.png
+
+# Superpowers planning docs (specs, plans) — local workflow only
+docs/superpowers/
