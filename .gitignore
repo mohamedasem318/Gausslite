@@ -59,3 +59,6 @@ secrets.json
 # Gausslite-specific
 installer/Output/
 *.signed
+
+# UiaDump diagnostic logs (may contain message content)
+tools/UiaDump/*.log
