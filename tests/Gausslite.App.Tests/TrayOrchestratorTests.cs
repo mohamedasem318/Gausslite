@@ -42,6 +42,9 @@ public sealed class TrayOrchestratorTests
         (_, action, _) => action(),
         (_, action) => action());
 
+    private static IReadOnlyList<Rect> FullRegion => new[] { new Rect(0, 0, 800, 600) };
+    private static IReadOnlyList<Rect> EmptyRegion => Array.Empty<Rect>();
+
     // Configures the factory to report WhatsApp as found.
     // item is null! because GraphicsCaptureItem cannot be constructed in unit tests;
     // TrayOrchestrator passes it straight through to the mocked ICaptureEngine which
@@ -50,7 +53,7 @@ public sealed class TrayOrchestratorTests
     {
         _windowTracker.IsWindowPresent.Returns(true);
         _windowTracker.IsMinimized.Returns(false);
-        _windowTracker.IsOccluded.Returns(false);
+        _windowTracker.VisibleRegion.Returns(FullRegion);
         _windowTracker.CurrentBounds.Returns(new Rect(0, 0, 800, 600));
 
         GraphicsCaptureItem? dummy = null;
@@ -63,7 +66,7 @@ public sealed class TrayOrchestratorTests
     {
         _windowTracker.IsWindowPresent.Returns(false);
         _windowTracker.IsMinimized.Returns(false);
-        _windowTracker.IsOccluded.Returns(false);
+        _windowTracker.VisibleRegion.Returns((IReadOnlyList<Rect>?)null);
         _windowTracker.CurrentBounds.Returns((Rect?)null);
 
         GraphicsCaptureItem? dummy = null;
@@ -76,7 +79,7 @@ public sealed class TrayOrchestratorTests
     {
         _windowTracker.IsWindowPresent.Returns(true);
         _windowTracker.IsMinimized.Returns(true);
-        _windowTracker.IsOccluded.Returns(false);
+        _windowTracker.VisibleRegion.Returns(EmptyRegion);
         _windowTracker.CurrentBounds.Returns((Rect?)null);
 
         GraphicsCaptureItem? dummy = null;
@@ -375,7 +378,7 @@ public sealed class TrayOrchestratorTests
         _overlayWindow.ClearReceivedCalls();
 
         SetupWhatsAppFound();
-        _windowTracker.IsOccluded.Returns(false);
+        _windowTracker.VisibleRegion.Returns(FullRegion);
 
         _windowTracker.MinimizedChanged += Raise.Event<EventHandler<bool>>(this, false);
 

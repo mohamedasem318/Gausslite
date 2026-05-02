@@ -78,6 +78,22 @@ public sealed class Win32Api : IWin32Api
     IntPtr IWin32Api.GetNextWindow(IntPtr hwnd) =>
         hwnd == IntPtr.Zero ? IntPtr.Zero : NativeMethods.GetWindow(hwnd, NativeMethods.GW_HWNDNEXT);
 
+    IntPtr IWin32Api.GetPreviousWindow(IntPtr hwnd) =>
+        hwnd == IntPtr.Zero ? IntPtr.Zero : NativeMethods.GetWindow(hwnd, NativeMethods.GW_HWNDPREV);
+
+    bool IWin32Api.IsWindowVisible(IntPtr hwnd) =>
+        hwnd != IntPtr.Zero && NativeMethods.IsWindowVisible(hwnd);
+
+    uint IWin32Api.GetWindowProcessId(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero) return 0;
+        NativeMethods.GetWindowThreadProcessId(hwnd, out uint pid);
+        return pid;
+    }
+
+    int IWin32Api.GetWindowExStyle(IntPtr hwnd) =>
+        hwnd == IntPtr.Zero ? 0 : NativeMethods.GetWindowLong(hwnd, NativeMethods.GWL_EXSTYLE);
+
     public IntPtr FindWindowHandle(Func<string, string, string, bool> predicate)
     {
         IntPtr result = IntPtr.Zero;
@@ -148,9 +164,15 @@ public sealed class Win32Api : IWin32Api
         public static extern IntPtr GetAncestor(IntPtr hwnd, uint gaFlags);
 
         public const uint GW_HWNDNEXT = 2;
+        public const uint GW_HWNDPREV = 3;
 
         [DllImport("user32.dll")]
         public static extern IntPtr GetWindow(IntPtr hwnd, uint uCmd);
+
+        public const int GWL_EXSTYLE = -20;
+
+        [DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
+        public static extern int GetWindowLong(IntPtr hwnd, int nIndex);
 
         [StructLayout(LayoutKind.Sequential)]
         public struct MONITORINFO

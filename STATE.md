@@ -12,7 +12,74 @@ definition and CHANGELOG.md for full v0.1.x development history.
 
 ## Last session summary
 
-**2026-05-02 — Idle repaint fix + WGC capture border + TFM bump to 22621.**
+**2026-05-02 — Edge-fade fix + true-region occlusion clipping.**
+
+Two features shipped this session.
+
+**Bug fix — Blur edge fade (Task 1).**
+Root cause confirmed via systematic debugging: `GaussianBlurEffect` default `BorderMode = Soft`
+fades out-of-bounds samples to transparent, creating a gradient fringe within `BlurRadius`
+pixels of every edge of the render target. The 14 × 7 px WGC-to-overlay size mismatch
+(documented in the previous session) compounds the effect when the render target is stretched
+to fill the overlay window.
+
+Fix: `Win2DBlurInterop.DrawPaddedBlur` (new private helper) pads the source frame before
+blurring. An intermediate `CanvasRenderTarget` of size `(W + 2·pad) × (H + 2·pad)` is
+allocated, filled with edge-clamped content via `BorderEffect.Clamp` + `DrawImage(sourceRect: (-pad,-pad,W+2pad,H+2pad))`,
+blurred via `GaussianBlurEffect`, then only the center crop `(pad, pad, W, H)` is written
+to the final D3D11 shared texture. Pad = `ceil(BlurRadius)`. Both `DrawBlur` (live frames)
+and `DrawBlurFromCache` (on-demand re-render) use the same helper. First-frame diagnostic
+log added to `TrayOrchestrator.OnFrameArrived` to record WGC ContentSize, overlay DIP bounds,
+and BlurRadius on frame #1.
+
+**Feature — Pixel-region occlusion clipping (Task 2).**
+Replaces the v0.1.0 "center-point hide-all" behavior. When another window partially covers
+WhatsApp, the overlay now clips to the visible region in real time.
+
+`IWindowTracker` change: `OcclusionChanged: EventHandler<bool>` and `IsOccluded: bool`
+replaced by `VisibleRegionChanged: EventHandler<IReadOnlyList<Rect>>` and
+`VisibleRegion: IReadOnlyList<Rect>?`. Empty list = fully occluded; single rect = visible;
+partial list = L-shape or multi-rect clip.
+
+`WindowTracker` change: `IsOccludedAtCenter` (center-point hit test) replaced by
+`ComputeVisibleRegion` (internal static, testable). Algorithm: walk Z-order above WhatsApp
+using `GetPreviousWindow` (`GW_HWNDPREV`), skip overlay HWND and minimized/invisible windows,
+subtract each covering window's rect via a 4-way split that produces up to 4 sub-rects
+per overlap. Two new `IWin32Api` methods: `GetPreviousWindow` and `IsWindowVisible`.
+
+`IOverlayWindow` gains `SetClip(IReadOnlyList<Rect>?)` which builds a frozen WPF
+`GeometryGroup` of `RectangleGeometry` instances (in overlay-local DIP coordinates) and
+sets it as `_contentRoot.Clip`. Null clears the clip. `TrayOrchestrator.ShowOverlay` always
+calls `ApplyRegionClip` after `MoveToBounds` so the clip is refreshed on every show and
+every `VisibleRegionChanged` event. `HideOverlay` clears the clip before parking offscreen.
+
+Eager-armed-setup contract preserved: `ComputeVisibleRegion` runs on already-captured frames;
+region detection does not gate capture or overlay creation.
+
+Three follow-up bugs found via smoke test and fixed in the same session:
+
+**Bug — title-bar "notch":** WhatsApp's own WinUI 3 `InputNonClientPointerSource` HWND sits
+above the main HWND in Z-order and covers the title bar area. `ComputeVisibleRegion` was
+subtracting it and clipping the title bar out of the blur. Fixed by skipping windows whose
+process ID matches WhatsApp's (`IWin32Api.GetWindowProcessId` added).
+
+**Bug — spurious clip patches during movement:** System UI windows with `WS_EX_TOOLWINDOW`
+(taskbar strips, `TopLevelWindowForOverflowXamlIsland`, DWM helpers) appear above normal
+windows and their rects intersected WhatsApp at various positions as it was dragged.
+`ComputeVisibleRegion` was counting them as covering apps and fragmenting the visible region.
+Fixed by skipping `WS_EX_TOOLWINDOW` windows (`IWin32Api.GetWindowExStyle` added).
+
+**Bug — solid-colour placeholder flash during drag:** `BoundsOutgrewLastBlurredFrame` compared
+DIP overlay width (1294) against WGC physical-pixel frame width (1280). The 14 px structural
+WGC-content-area gap always exceeded the `+1` threshold, so the placeholder was shown on EVERY
+position change — not just resizes. Fixed by replacing the check with `OverlaySizeGrew` which
+compares consecutive DIP bounds sizes. A pure move preserves the same DIP size and never
+triggers the placeholder; an actual resize still shows it. Fields `_lastBlurredFrameWidth`/
+`_lastBlurredFrameHeight`/`_lastBlurredFrameTimestamp` removed (no longer needed).
+
+Test counts: Core 68/68, App 46/46 (x64). Build: 0 errors, 1 pre-existing Win2D AnyCPU warning.
+
+**Previous session (2026-05-02 — Idle repaint fix + WGC capture border + TFM bump to 22621).**
 
 Three bugs diagnosed from log analysis and fixed in one session:
 
@@ -51,8 +118,8 @@ AnyCPU warning.
 ## Next up
 
 **v0.2.0 — "The right regions"** remaining items. `IAppProfile`, blur-intensity presets,
-AddDirtyRect + InvalidateVisual repaint improvements, and the region scope submenu scaffold
-are done.
+AddDirtyRect + InvalidateVisual repaint improvements, region scope submenu scaffold,
+edge-fade fix, and pixel-region occlusion clipping are all done.
 
 Pick one for the next session:
 
@@ -62,23 +129,48 @@ v0.2.0 remaining work (no required order):
   computer-vision fallback, returning chat-list and conversation
   rects in WhatsApp's window coordinate space. Headline feature;
   largest single piece of work. Will extend `IAppProfile` when it lands.
-- Pixel-region occlusion clipping (replaces v0.1.0 center-point
-  hide-all behavior when WhatsApp is partially behind another window)
 - Tray menu region scope submenu ("Blur chat list" / "Blur
   conversation" / "Blur both") — depends on RegionDetector
 - Smoke test on 3 different WhatsApp Desktop layouts (default, narrow, wide)
 
 ## Blockers
 
-- **Blur edge fade (known visual defect).** `GaussianBlurEffect.BorderMode = Soft`
-  combined with the 14 × 7 px WGC-to-overlay size mismatch creates a visible gradient
-  fringe on all four sides. The correct fix is to pad the source texture (clamp edge
-  pixels into a border of width ≥ `BlurRadius`) before running the effect so the fade
-  zone falls outside the visible area. Deferred; no functional blocker.
+None.
 
 ## Recent decisions
 
 (See `PLAN.md` Decisions Log for the full history.)
+
+- **Blur edge fade fixed via padded intermediate texture.** `Win2DBlurInterop.DrawPaddedBlur`
+  allocates a `(W + 2·pad) × (H + 2·pad)` CanvasRenderTarget on each frame render, fills it
+  using `BorderEffect.Clamp` to extend edge pixels into the padding zone, blurs the padded
+  texture, then writes only the center crop into the shared D3D11 render target. `pad = ceil(BlurRadius)`.
+  No new interface members were needed; the padding is entirely internal to `Win2DBlurInterop`.
+  Per-frame allocation is accepted as negligible overhead at 30fps.
+
+- **`ComputeVisibleRegion` skips same-process and `WS_EX_TOOLWINDOW` windows.**
+  Same-PID filter removes WhatsApp's own internal WinUI 3 HWNDs (e.g.
+  `InputNonClientPointerSource`). `WS_EX_TOOLWINDOW` filter removes system UI strips
+  (taskbar, tray, DWM helpers) that overlap WhatsApp's rect without visually covering it.
+  Both filters use new `IWin32Api` methods `GetWindowProcessId` and `GetWindowExStyle`.
+
+- **`OverlaySizeGrew` replaces `BoundsOutgrewLastBlurredFrame`.** The old function mixed DIP
+  overlay size with physical-pixel frame size; the 14 px structural gap always triggered
+  the placeholder. New function compares consecutive DIP bounds sizes — only true when
+  WhatsApp is actually resized.
+
+- **`IWindowTracker` visible-region API replaces the bool occlusion API.**
+  `OcclusionChanged: EventHandler<bool>` and `bool IsOccluded` are removed.
+  `VisibleRegionChanged: EventHandler<IReadOnlyList<Rect>>` and `IReadOnlyList<Rect>? VisibleRegion`
+  are the new seam. The list is `null` when the window is absent, empty when fully occluded,
+  and non-empty (one or more DIP rects) when visible. `WindowTracker.ComputeVisibleRegion`
+  is an `internal static` method — directly testable without starting the poll loop.
+
+- **Z-order walk uses `GW_HWNDPREV` on whatsappRoot, not center-point hit-test.**
+  `GetWindow(hwnd, GW_HWNDPREV)` walks from WhatsApp's root upward to the topmost window.
+  Each window is checked for visibility + non-minimized before subtracting its rect.
+  The overlay HWND is skipped by comparing roots. This generalises correctly to multiple
+  covering windows and arbitrary partial-overlap shapes.
 
 - **D3D11 context flush pattern for on-demand re-renders.** `IBlurInterop.FlushDevice`
   must be called after all Win2D drawing sessions complete in `TryRenderCurrentFrame`,
