@@ -1,3 +1,4 @@
+using System.IO;
 using System.Runtime.InteropServices;
 using Gausslite.Core.AppProfiles;
 using Gausslite.Core.Capture;
@@ -12,7 +13,39 @@ using WinRT;
 
 // ── Entry point ──────────────────────────────────────────────────────────────
 
-Console.WriteLine("RegionDump placeholder");
+string label = args.Length > 0 ? args[0] : "unlabeled";
+
+IntPtr hwnd = FindWhatsAppWindow();
+if (hwnd == IntPtr.Zero)
+{
+    Console.Error.WriteLine("WhatsApp Desktop window not found.");
+    return 1;
+}
+
+GraphicsCaptureItem? item = CreateCaptureItem(hwnd);
+if (item is null) return 1;
+
+IDirect3DDevice device = CreateD3DDevice();
+
+var frameData = CaptureOneFrame(item, device);
+if (frameData is null) return 1;
+
+var (pixels, width, height, stride) = frameData.Value;
+
+string cwd           = Environment.CurrentDirectory;
+string rawPath       = Path.Combine(cwd, $"region-dump-{label}-raw.png");
+string annotatedPath = Path.Combine(cwd, $"region-dump-{label}-annotated.png");
+
+SaveRawPng(pixels, width, height, stride, rawPath);
+
+var detector  = new WhatsAppRegionDetector();
+var detection = detector.Detect(pixels, width, height, stride);
+
+SaveAnnotatedPng(pixels, width, height, stride, detection, annotatedPath);
+
+PrintSummary(label, width, height, detection, rawPath, annotatedPath);
+
+return 0;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -227,6 +260,37 @@ static void DrawRegionRect(
     float bgH = sz.Height + 2f;
     g.FillRectangle(bgBrush, x, y, bgW, bgH);
     g.DrawString(label, labelFont, textBrush, x + 3f, y + 1f);
+}
+
+static void PrintSummary(
+    string label, int width, int height,
+    RegionDetectionResult detection, string rawPath, string annotatedPath)
+{
+    Console.WriteLine($"Label:        {label}");
+    Console.WriteLine($"Frame size:   {width}x{height}");
+
+    if (detection.Succeeded)
+    {
+        int dividerX = (int)detection.ChatListRect.Right;  // == ConversationRect.Left
+        Console.WriteLine("Detection:    SUCCEEDED");
+        Console.WriteLine($"Divider x:    {dividerX}");
+        Console.WriteLine($"Chat list:    ({(int)detection.ChatListRect.X}, " +
+                          $"{(int)detection.ChatListRect.Y}, " +
+                          $"{(int)detection.ChatListRect.Width}, " +
+                          $"{(int)detection.ChatListRect.Height})");
+        Console.WriteLine($"Conversation: ({(int)detection.ConversationRect.X}, " +
+                          $"{(int)detection.ConversationRect.Y}, " +
+                          $"{(int)detection.ConversationRect.Width}, " +
+                          $"{(int)detection.ConversationRect.Height})");
+    }
+    else
+    {
+        Console.WriteLine("Detection:    FAILED");
+        Console.WriteLine($"Failure reason: {detection.FailureReason}");
+    }
+
+    Console.WriteLine($"Output:       {Path.GetFileName(rawPath)}, " +
+                      $"{Path.GetFileName(annotatedPath)}");
 }
 
 // ── COM interfaces ────────────────────────────────────────────────────────────
