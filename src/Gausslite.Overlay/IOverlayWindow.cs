@@ -31,4 +31,12 @@ public interface IOverlayWindow : IDisposable
     /// Safe to call from any thread; dispatches to the UI thread internally.
     /// </summary>
     void PresentFrame(IBlurRenderTarget target);
+
+    /// <summary>
+    /// Applies a WPF clip geometry to the overlay content so blur is only rendered
+    /// over <paramref name="visibleRects"/> (in overlay-local DIP coordinates).
+    /// Pass <c>null</c> to clear the clip and render the full overlay.
+    /// Must be called on the WPF UI thread.
+    /// </summary>
+    void SetClip(IReadOnlyList<Rect>? visibleRects);
 }

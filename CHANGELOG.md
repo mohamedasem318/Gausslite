@@ -25,7 +25,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Minimum supported Windows version raised from 10.0.19041 to 10.0.22621 (Windows 11
   22H2) to access `GraphicsCaptureSession.IsBorderRequired`.
 
+### Added
+- Pixel-region occlusion clipping: when another window covers part of WhatsApp, the
+  overlay clips to the visible portion instead of hiding entirely. `WindowTracker`
+  walks the Z-order above WhatsApp (`GW_HWNDPREV`), filters out same-process HWNDs
+  (WhatsApp's own WinUI 3 helper windows) and `WS_EX_TOOLWINDOW` system UI, then
+  subtracts each remaining covering window's rect. `IWindowTracker` replaces the
+  `IsOccluded` bool with `VisibleRegion: IReadOnlyList<Rect>?`; `IOverlayWindow` gains
+  `SetClip` to apply the region as a WPF `GeometryGroup` clip. Fully-occluded case
+  still hides the overlay; fully-visible case applies no clip.
+
 ### Fixed
+- Solid-colour flash eliminated when dragging WhatsApp. The overlay used to briefly
+  show the dark placeholder colour on every position change because
+  `BoundsOutgrewLastBlurredFrame` compared DIP overlay width (1294) against the WGC
+  physical-pixel frame width (1280); the 14 px structural gap always exceeded the `+1`
+  threshold. Replaced with `OverlaySizeGrew` which compares consecutive DIP sizes — a
+  pure move keeps the same size and never triggers the placeholder; an actual resize
+  still shows the placeholder until the new WGC frame arrives.
+- Title-bar "notch" eliminated: WhatsApp's WinUI 3 `InputNonClientPointerSource` HWND
+  sits above the main window in Z-order and covers the title-bar area. `ComputeVisibleRegion`
+  now skips windows that share WhatsApp's process ID, removing this internal helper from
+  the covering calculation.
+- Spurious clip patches during movement eliminated: system UI windows (`WS_EX_TOOLWINDOW`
+  — taskbar strips, tray overflow popups, DWM helpers) were being counted as covering apps
+  and fragmenting the visible region. `ComputeVisibleRegion` now skips any window with
+  `WS_EX_TOOLWINDOW` in its extended style.
+- Blur edge fade eliminated: `GaussianBlurEffect` default `BorderMode = Soft` was
+  fading the blur to transparent within `BlurRadius` pixels of every edge, creating a
+  visible gradient fringe on all four sides of the overlay. Fix: before blurring, the
+  source frame is placed in a padded intermediate texture (edge pixels clamped via
+  `BorderEffect.Clamp`); the GaussianBlur is applied to the padded texture; and only
+  the center crop (original frame dimensions) is written to the final render target, so
+  the fade zone falls entirely within the discarded padding border.
 - `D3DImage.AddDirtyRect` (full rect, between `SetBackBuffer` and `Unlock`) and
   `Image.InvalidateVisual` (after `Unlock`) are now called on every present, improving
   repaint reliability for the natural 60fps capture path.
@@ -39,14 +71,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Yellow/amber capture-indicator border no longer appears around WhatsApp while blur
   is active. `GraphicsCaptureSession.IsBorderRequired` is now set to `false` on
   Windows 11 22H2+ at session start; silently skipped on older OS versions.
-
-### Known Issues
-- Blur fades at the edges of the WhatsApp window (visible as a gradient fringe on
-  all four sides). Root cause: `GaussianBlurEffect` uses `BorderMode = Soft` (default),
-  which treats out-of-bounds samples as transparent; combined with a 14 × 7 pixel size
-  difference between the WGC content area (1280 × 765) and the overlay window bounds
-  (1294 × 772), the fade zone is visible in the stretched overlay. Fix (padding the
-  source texture before blurring) deferred to a follow-up session.
 
 ## [0.1.1] - 2026-04-30
 

@@ -17,4 +17,19 @@ public interface IWin32Api
     /// <paramref name="predicate"/> returns true, or <see cref="IntPtr.Zero"/> if none match.
     /// </summary>
     IntPtr FindWindowHandle(Func<string, string, string, bool> predicate);
+
+    /// <summary>
+    /// Returns the window immediately above <paramref name="hwnd"/> in Z-order
+    /// (<c>GetWindow(hwnd, GW_HWNDPREV)</c>), or <see cref="IntPtr.Zero"/> if none.
+    /// </summary>
+    IntPtr GetPreviousWindow(IntPtr hwnd);
+
+    /// <summary>Returns true if <paramref name="hwnd"/> is visible (<c>IsWindowVisible</c>).</summary>
+    bool IsWindowVisible(IntPtr hwnd);
+
+    /// <summary>Returns the process ID of the thread that created <paramref name="hwnd"/>.</summary>
+    uint GetWindowProcessId(IntPtr hwnd);
+
+    /// <summary>Returns the extended window style (<c>GetWindowLong(hwnd, GWL_EXSTYLE)</c>).</summary>
+    int GetWindowExStyle(IntPtr hwnd);
 }

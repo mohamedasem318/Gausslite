@@ -46,9 +46,6 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
     private int _frameCount;
     private int _frameExceptionCount;
     private int _noOutputLogged;     // 0 = not yet logged, 1 = logged
-    private long _lastBlurredFrameTimestamp;
-    private int _lastBlurredFrameWidth;
-    private int _lastBlurredFrameHeight;
 
     public event EventHandler<bool>? BlurStateChanged;
 
@@ -140,7 +137,7 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
         StartupLog.Info("EnableBlur: starting WindowTracker...");
         _windowTracker.BoundsChanged += OnBoundsChanged;
         _windowTracker.MinimizedChanged += OnMinimizedChanged;
-        _windowTracker.OcclusionChanged += OnOcclusionChanged;
+        _windowTracker.VisibleRegionChanged += OnVisibleRegionChanged;
         _windowTracker.WindowPresenceChanged += OnWindowPresenceChanged;
         _windowTracker.Start();
         StartupLog.Info("EnableBlur: WindowTracker started");
@@ -167,7 +164,7 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
         TransitionToIdle("DisableBlur");
         _windowTracker.BoundsChanged -= OnBoundsChanged;
         _windowTracker.MinimizedChanged -= OnMinimizedChanged;
-        _windowTracker.OcclusionChanged -= OnOcclusionChanged;
+        _windowTracker.VisibleRegionChanged -= OnVisibleRegionChanged;
         _windowTracker.WindowPresenceChanged -= OnWindowPresenceChanged;
         _windowTracker.Stop();
 
@@ -331,6 +328,7 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
         }
 
         StartupLog.Info($"{source}: moving overlay offscreen");
+        _overlayWindow.SetClip(null);
         _overlayWindow.MoveOffscreen();
         _overlayVisible = false;
         StartupLog.Info($"{source}: overlay moved offscreen");
@@ -345,19 +343,21 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
             return;
         }
 
-        if (_overlayVisible)
+        var bounds = CacheCurrentOrDefaultBounds(source);
+
+        if (!_overlayVisible)
         {
-            StartupLog.Info($"{source}: overlay already active; skipping duplicate MoveToBounds");
-            return;
+            StartupLog.Info($"{source}: moving overlay on-screen to bounds {bounds}");
+            _overlayWindow.MoveToBounds(bounds);
+            _overlayVisible = true;
+            TransitionToActive(source);
+            var elapsedText = eventTimestamp.HasValue ? $", event-to-move={ElapsedMilliseconds(eventTimestamp.Value):F3} ms" : string.Empty;
+            StartupLog.Info($"{source}: overlay move applied to bounds {bounds}{elapsedText}; expected privacy-critical event-to-move under 20 ms");
         }
 
-        var bounds = CacheCurrentOrDefaultBounds(source);
-        StartupLog.Info($"{source}: moving overlay on-screen to bounds {bounds}");
-        _overlayWindow.MoveToBounds(bounds);
-        _overlayVisible = true;
-        TransitionToActive(source);
-        var elapsedText = eventTimestamp.HasValue ? $", event-to-move={ElapsedMilliseconds(eventTimestamp.Value):F3} ms" : string.Empty;
-        StartupLog.Info($"{source}: overlay move applied to bounds {bounds}{elapsedText}; expected privacy-critical event-to-move under 20 ms");
+        // Always (re-)apply the visible-region clip after showing or while already visible,
+        // so region changes while the overlay is active are reflected immediately.
+        ApplyRegionClip(source, bounds);
     }
 
     private void OnBoundsChanged(object? sender, Rect bounds)
@@ -369,14 +369,20 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
             if (!IsBlurEnabled)
                 return;
 
+            // Capture the previous bounds before overwriting so we can compare sizes.
+            var previousBounds = _lastKnownBounds;
             _lastKnownBounds = bounds;
             if (_setupReady)
             {
-                if (_activation.State == BlurActivationState.Active && BoundsOutgrewLastBlurredFrame(bounds))
+                if (_activation.State == BlurActivationState.Active && OverlaySizeGrew(bounds, previousBounds))
                 {
-                    StartupLog.Info(
-                        "OnBoundsChanged: overlay bounds outgrew last blurred frame " +
-                        $"{_lastBlurredFrameWidth}x{_lastBlurredFrameHeight}; showing placeholder until resized frame arrives");
+                    // Only show the placeholder when the overlay window actually grew
+                    // (WhatsApp was resized) — NOT on pure position changes.  The old
+                    // BoundsOutgrewLastBlurredFrame compared DIP overlay size against the
+                    // WGC physical-pixel frame size; the 14 × 7 px WGC-content-area gap
+                    // always made that condition true, causing a solid-color flash on
+                    // every move.
+                    StartupLog.Info($"OnBoundsChanged: overlay size grew from {previousBounds} to {bounds}; showing placeholder until resized frame arrives");
                     _overlayWindow.ShowPlaceholder();
                 }
 
@@ -425,7 +431,7 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
                 return;
             }
 
-            if (_windowTracker.IsOccluded)
+            if (!HasVisibleRegion())
             {
                 DiagLog.Info($"OnMinimizedChanged: restore arrived while {_profile.Name} is still occluded; keeping overlay hidden");
                 TransitionToArmed("OnMinimizedChanged");
@@ -436,33 +442,34 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
         }, priority);
     }
 
-    private void OnOcclusionChanged(object? sender, bool isOccluded)
+    private void OnVisibleRegionChanged(object? sender, IReadOnlyList<System.Windows.Rect> region)
     {
-        var priority = isOccluded ? DispatcherPriority.Normal : DispatcherPriority.Send;
+        var fullyOccluded = region.Count == 0;
+        var priority = fullyOccluded ? DispatcherPriority.Normal : DispatcherPriority.Send;
         var eventReceivedAt = Stopwatch.GetTimestamp();
-        DiagLog.Info($"OnOcclusionChanged: received occluded={isOccluded}; dispatching overlay work to UI thread at priority={priority}");
+        DiagLog.Info($"OnVisibleRegionChanged: region has {region.Count} rect(s); dispatching to UI thread at priority={priority}");
 
-        _dispatchToUiThread("OnOcclusionChanged", () =>
+        _dispatchToUiThread("OnVisibleRegionChanged", () =>
         {
-            DiagLog.Info($"OnOcclusionChanged: applying occluded={isOccluded} on UI thread");
+            DiagLog.Info($"OnVisibleRegionChanged: applying region ({region.Count} rect(s)) on UI thread");
 
             if (!IsBlurEnabled)
                 return;
 
-            if (isOccluded)
+            if (fullyOccluded)
             {
-                TransitionToArmed("OnOcclusionChanged");
-                HideOverlay("OnOcclusionChanged");
+                TransitionToArmed("OnVisibleRegionChanged");
+                HideOverlay("OnVisibleRegionChanged");
                 return;
             }
 
             if (!_windowTracker.IsWindowPresent || _windowTracker.IsMinimized)
             {
-                TransitionToArmed("OnOcclusionChanged");
+                TransitionToArmed("OnVisibleRegionChanged");
                 return;
             }
 
-            ShowOverlay("OnOcclusionChanged", eventReceivedAt);
+            ShowOverlay("OnVisibleRegionChanged", eventReceivedAt);
         }, priority);
     }
 
@@ -495,7 +502,7 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
         if (!IsBlurEnabled)
             return;
 
-        if (!_windowTracker.IsWindowPresent || _windowTracker.IsMinimized || _windowTracker.IsOccluded)
+        if (!_windowTracker.IsWindowPresent || _windowTracker.IsMinimized || !HasVisibleRegion())
         {
             TransitionToArmed(source);
             HideOverlay(source);
@@ -503,6 +510,37 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
         }
 
         ShowOverlay(source);
+    }
+
+    // True when the tracker reports a non-empty visible region (i.e. window is not fully occluded).
+    private bool HasVisibleRegion() => (_windowTracker.VisibleRegion?.Count ?? 0) > 0;
+
+    // Applies a WPF clip to the overlay based on the current visible region.
+    // Called after MoveToBounds so the clip is in overlay-local DIP coordinates.
+    private void ApplyRegionClip(string source, Rect overlayBounds)
+    {
+        var region = _windowTracker.VisibleRegion;
+        if (region is null || region.Count == 0)
+        {
+            _overlayWindow.SetClip(null);
+            return;
+        }
+
+        // Full-bounds case → no clip needed.
+        if (region.Count == 1 && region[0] == overlayBounds)
+        {
+            _overlayWindow.SetClip(null);
+            StartupLog.Info($"{source}: full visibility — clip cleared");
+            return;
+        }
+
+        // Convert screen-DIP rects to overlay-local coordinates (origin = overlay top-left).
+        var localRects = new List<Rect>(region.Count);
+        foreach (var r in region)
+            localRects.Add(new Rect(r.X - overlayBounds.X, r.Y - overlayBounds.Y, r.Width, r.Height));
+
+        _overlayWindow.SetClip(localRects);
+        StartupLog.Info($"{source}: partial visibility — clip set to {localRects.Count} local rect(s)");
     }
 
     private void TransitionToIdle(string source)
@@ -599,6 +637,10 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
             var sz = frame.ContentSize;
             if (count <= 10 || count % 30 == 0)
                 StartupLog.Info($"FrameArrived #{count}: dims={sz.Width}x{sz.Height}");
+            if (count == 1)
+                StartupLog.Info(
+                    $"FrameArrived #1 edge-fade diag: WGC ContentSize={sz.Width}x{sz.Height} px, " +
+                    $"overlay DIP bounds={_lastKnownBounds}, BlurRadius={_blurPipeline.BlurRadius:F1} px");
 
             var blurred = _blurPipeline.BlurFrame(frame);
 
@@ -610,9 +652,6 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
             }
 
             _overlayWindow.PresentFrame(blurred);
-            Interlocked.Exchange(ref _lastBlurredFrameWidth, sz.Width);
-            Interlocked.Exchange(ref _lastBlurredFrameHeight, sz.Height);
-            Interlocked.Exchange(ref _lastBlurredFrameTimestamp, Stopwatch.GetTimestamp());
         }
         catch (Exception ex)
         {
@@ -622,14 +661,17 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
         }
     }
 
-    private bool BoundsOutgrewLastBlurredFrame(Rect bounds)
+    // Returns true only when the overlay window's DIP size increased — i.e. WhatsApp was
+    // resized, not just moved.  Comparing DIP-to-DIP avoids the false positive that the
+    // old BoundsOutgrewLastBlurredFrame produced: it mixed DIP overlay size against
+    // physical-pixel WGC frame size, and the 14 × 7 px structural gap between the two
+    // always tripped the threshold, triggering a solid-colour placeholder flash on every
+    // position change during a drag.
+    private static bool OverlaySizeGrew(Rect newBounds, Rect? previousBounds)
     {
-        int width = Interlocked.CompareExchange(ref _lastBlurredFrameWidth, 0, 0);
-        int height = Interlocked.CompareExchange(ref _lastBlurredFrameHeight, 0, 0);
-        if (width <= 0 || height <= 0)
-            return true;
-
-        return bounds.Width > width + 1 || bounds.Height > height + 1;
+        if (!previousBounds.HasValue) return true; // first bounds received
+        return newBounds.Width  > previousBounds.Value.Width  + 1 ||
+               newBounds.Height > previousBounds.Value.Height + 1;
     }
 
     private void OnHotkeyPressed(object? sender, EventArgs e) => ToggleBlur();
@@ -647,7 +689,7 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
             TransitionToIdle("Dispose");
             _windowTracker.BoundsChanged -= OnBoundsChanged;
             _windowTracker.MinimizedChanged -= OnMinimizedChanged;
-            _windowTracker.OcclusionChanged -= OnOcclusionChanged;
+            _windowTracker.VisibleRegionChanged -= OnVisibleRegionChanged;
             _windowTracker.WindowPresenceChanged -= OnWindowPresenceChanged;
             _windowTracker.Stop();
         }
