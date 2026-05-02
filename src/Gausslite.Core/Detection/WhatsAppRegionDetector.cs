@@ -11,6 +11,10 @@ public sealed class WhatsAppRegionDetector : IRegionDetector
     private const int    EdgeStrengthThreshold = 30;
     private const int    RowSampleStep         = 10;   // sample a row every N px
     private const double ConsistencyRequired   = 0.70; // fraction of sampled rows that must show the edge
+    private const int    TitleBarIgnore       = 30;   // skip top N px (window controls live there)
+    private const int    RailSearchMaxPx     = 200;  // absolute ceiling: walk at most 200 px from each edge
+    private const double RailSearchCapFrac   = 0.40; // relative cap: never exceed 40 % of frame width
+    private const double ColumnBusyFraction  = 0.25; // fraction of sampled rows that marks a column as content
 
     public RegionDetectionResult Detect(
         ReadOnlySpan<byte> bgraPixels,
@@ -68,17 +72,112 @@ public sealed class WhatsAppRegionDetector : IRegionDetector
             return Fail("no strong edge found");
         }
 
-        // WhatsApp Desktop is LTR: the chat list is always the left panel.
-        var chatListRect     = new Rect(0,      0, bestX,              frameHeight);
-        var conversationRect = new Rect(bestX,  0, frameWidth - bestX, frameHeight);
+        var (railSide, leftWidth, rightWidth) =
+            DetermineRailSide(bgraPixels, frameStride, frameWidth, frameHeight);
+
+        Rect chatListRect, conversationRect;
+        if (railSide == RailSide.Right)
+        {
+            // RTL layout: navigation rail is on the right → chat list is the right panel.
+            chatListRect     = new Rect(bestX, 0, frameWidth - bestX, frameHeight);
+            conversationRect = new Rect(0,     0, bestX,              frameHeight);
+        }
+        else
+        {
+            // LTR layout (default): navigation rail is on the left → chat list is the left panel.
+            chatListRect     = new Rect(0,     0, bestX,              frameHeight);
+            conversationRect = new Rect(bestX, 0, frameWidth - bestX, frameHeight);
+        }
 
         return new RegionDetectionResult
         {
-            Succeeded        = true,
-            ChatListRect     = chatListRect,
-            ConversationRect = conversationRect,
-            FailureReason    = string.Empty,
+            Succeeded          = true,
+            ChatListRect       = chatListRect,
+            ConversationRect   = conversationRect,
+            FailureReason      = string.Empty,
+            DetectedRailSide  = railSide,
+            RailSideLeftWidth  = leftWidth,
+            RailSideRightWidth = rightWidth,
         };
+    }
+
+    // Determine which outer edge carries the navigation rail by measuring how far
+    // inward from each edge the frame is vertically uniform (the rail's signature).
+    //
+    // The rail is a narrow (~50 px) solid-background column at the frame's outer edge.
+    // Its columns are vertically uniform (row-to-row deltas ≈ 0).  Chat-list content
+    // (contact rows, avatars, timestamps) follows within ~100 px of the edge, and is
+    // detectable at the 25% row-activity threshold.  The conversation pane's outer
+    // edge may also be quiet (empty background, no message bubbles near the frame
+    // edge), but because it lacks a fixed chat-list boundary it often exhausts the
+    // search range without triggering the busy threshold.
+    //
+    // maxSearch is a fixed 200-px ceiling (capped at 40% of frame width) so it
+    // reaches the chat-list transition even on narrow windows where 10% of frame
+    // width would fall short.
+    //
+    // Key invariant: default width is 0, not maxSearch.  "No transition found" means
+    // no rail evidence on that side, NOT a wide quiet zone.  A genuine rail always
+    // produces a detectable boundary (chat-list content) within RailSearchFraction;
+    // a featureless background that exhausts the search must score 0 so it cannot
+    // impersonate a wide rail and flip the result.
+    //
+    // Decision: larger non-zero width wins.  Both zero → LTR fallback (Left).
+    private static (RailSide side, int leftWidth, int rightWidth) DetermineRailSide(
+        ReadOnlySpan<byte> pixels, int stride, int frameWidth, int frameHeight)
+    {
+        // Search up to RailSearchMaxPx from each outer edge, but never more than 40% of
+        // frame width so we stay well within each pane regardless of window size.
+        int maxSearch = Math.Min(RailSearchMaxPx, (int)(RailSearchCapFrac * frameWidth));
+
+        int effectiveSampled = 0;
+        for (int y = TitleBarIgnore; y < frameHeight; y += RowSampleStep)
+            effectiveSampled++;
+        int busyThreshold = Math.Max(3, (int)(effectiveSampled * ColumnBusyFraction));
+
+        // Default 0: "no transition found" means no rail evidence on this side.
+        // The rail always has a chat-list boundary within maxSearch that trips busyThreshold;
+        // a uniformly quiet background never does, so it must not impersonate a wide quiet zone.
+        //
+        // Start both walks from EdgeIgnorePixels (same guard as the divider scan) to avoid
+        // triggering on sub-pixel window border artifacts at x=0 or x=frameWidth-1.
+        int leftWidth = 0;
+        for (int x = EdgeIgnorePixels; x < maxSearch; x++)
+        {
+            int count = 0;
+            for (int y = TitleBarIgnore; y < frameHeight; y += RowSampleStep)
+                if (RowDelta(pixels, stride, x, y) > EdgeStrengthThreshold)
+                    count++;
+            if (count >= busyThreshold) { leftWidth = x; break; }
+        }
+
+        int rightWidth = 0;
+        for (int x = frameWidth - 1 - EdgeIgnorePixels; x >= frameWidth - maxSearch; x--)
+        {
+            int count = 0;
+            for (int y = TitleBarIgnore; y < frameHeight; y += RowSampleStep)
+                if (RowDelta(pixels, stride, x, y) > EdgeStrengthThreshold)
+                    count++;
+            if (count >= busyThreshold) { rightWidth = frameWidth - 1 - x; break; }
+        }
+
+        // The side with the wider quiet zone is the rail side.
+        // Strict greater-than keeps ties (including both-zero) as LTR (Left).
+        RailSide side = rightWidth > leftWidth ? RailSide.Right : RailSide.Left;
+        return (side, leftWidth, rightWidth);
+    }
+
+    // Vertical-edge strength at (x, y): L1 sum of |B|+|G|+|R| deltas between
+    // pixel (x, y-1) and pixel (x, y).  Measures how much a column's colour changes
+    // from one row to the next — high value means the column is not vertically uniform.
+    private static int RowDelta(ReadOnlySpan<byte> pixels, int stride, int x, int y)
+    {
+        int top    = (y - 1) * stride + x * 4;
+        int bottom = y       * stride + x * 4;
+        int db = Math.Abs(pixels[bottom]     - pixels[top]);
+        int dg = Math.Abs(pixels[bottom + 1] - pixels[top + 1]);
+        int dr = Math.Abs(pixels[bottom + 2] - pixels[top + 2]);
+        return db + dg + dr;
     }
 
     private static int CountConsistentRows(

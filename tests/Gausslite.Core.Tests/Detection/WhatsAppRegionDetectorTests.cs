@@ -42,8 +42,9 @@ public sealed class WhatsAppRegionDetectorTests
         Assert.Equal(new Rect(300, 0, 980, H), result.ConversationRect);
     }
 
-    // Test 2: Divider right of centre (wide chat list) — WhatsApp is LTR so the
-    // left panel is always the chat list, regardless of which side is narrower.
+    // Test 2: Divider right of centre with no rail signal on either edge. Both strips
+    // are uniform, so rail scores tie at zero — the LTR fallback assigns the left panel
+    // as chat list regardless of which side is narrower.
     [Fact]
     public void Detect_DividerRightOfCenter_ChatListIsAlwaysLeftPanel()
     {
@@ -117,6 +118,137 @@ public sealed class WhatsAppRegionDetectorTests
         Assert.True(result.Succeeded);
         Assert.Equal(new Rect(0,   0, 250, H), result.ChatListRect);
         Assert.Equal(new Rect(250, 0, 550, H), result.ConversationRect);
+    }
+
+    // Test 8: LTR layout — narrow uniform rail on the left, content on both sides.
+    // x=0..49: uniform dark background (the rail — no row-to-row variation).
+    // x=50..399: row-varying content (chat list).
+    // x=400..1279: row-varying content with different range (conversation).
+    // Divider at x=400.  Rail detection walks left edge, finds 50 quiet columns,
+    // walks right edge, finds 0 quiet columns → Left wins → ChatListRect.X == 0.
+    [Fact]
+    public void Detect_RailOnLeft_AssignsChatListToLeft()
+    {
+        const int W = 1280, H = 800, Stride = W * 4;
+        var frame = BuildFrame(W, H, Stride, (x, y) =>
+        {
+            if (x < 50)  // rail: vertically uniform
+                return ((byte)30, (byte)30, (byte)30);
+            if (x < 400) // chat list: content varies every 10 rows
+            {
+                byte v = (y / 10) % 2 == 0 ? (byte)20 : (byte)70;
+                return (v, v, v);
+            }
+            // conversation: content varies every 10 rows, different brightness range
+            {
+                byte v = (y / 10) % 2 == 0 ? (byte)180 : (byte)230;
+                return (v, v, v);
+            }
+        });
+
+        var result = _detector.Detect(frame, W, H, Stride);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(0.0, result.ChatListRect.X);
+        Assert.Equal(RailSide.Left, result.DetectedRailSide);
+        Assert.True(result.RailSideLeftWidth > result.RailSideRightWidth,
+            $"Expected leftWidth ({result.RailSideLeftWidth}) > rightWidth ({result.RailSideRightWidth})");
+    }
+
+    // Test 9: RTL layout — narrow uniform rail on the right.
+    // x=0..399: row-varying content (conversation).
+    // x=400..1229: row-varying content (chat list).
+    // x=1230..1279: uniform dark background (the rail — 50 px).
+    // Divider at x=400.  Rail detection: right edge walks 50 quiet columns,
+    // left edge finds 0 quiet columns → Right wins → ChatListRect.X == 400.
+    [Fact]
+    public void Detect_RailOnRight_AssignsChatListToRight()
+    {
+        const int W = 1280, H = 800, Stride = W * 4;
+        var frame = BuildFrame(W, H, Stride, (x, y) =>
+        {
+            if (x >= 1230) // rail: vertically uniform
+                return ((byte)30, (byte)30, (byte)30);
+            if (x >= 400)  // chat list: content varies every 10 rows
+            {
+                byte v = (y / 10) % 2 == 0 ? (byte)20 : (byte)70;
+                return (v, v, v);
+            }
+            // conversation: content varies every 10 rows, different brightness range
+            {
+                byte v = (y / 10) % 2 == 0 ? (byte)180 : (byte)230;
+                return (v, v, v);
+            }
+        });
+
+        var result = _detector.Detect(frame, W, H, Stride);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(new Rect(400, 0, 880, H), result.ChatListRect);
+        Assert.Equal(new Rect(0,   0, 400, H), result.ConversationRect);
+        Assert.Equal(RailSide.Right, result.DetectedRailSide);
+        Assert.True(result.RailSideRightWidth > result.RailSideLeftWidth,
+            $"Expected rightWidth ({result.RailSideRightWidth}) > leftWidth ({result.RailSideLeftWidth})");
+    }
+
+    // Test 10: No quiet zone on either edge — content starts immediately on both sides.
+    // Both widths are zero; detector falls back to LTR (chat list on left).
+    [Fact]
+    public void Detect_NoRailSignalEitherSide_DefaultsToLeft()
+    {
+        const int W = 1280, H = 800, Stride = W * 4;
+        // Both edges have row-varying content immediately — no quiet zone.
+        var frame = BuildFrame(W, H, Stride, (x, y) =>
+        {
+            byte v = (y / 10) % 2 == 0 ? (byte)20 : (byte)70;
+            if (x < 640)
+                return (v, v, v);
+            byte v2 = (y / 10) % 2 == 0 ? (byte)180 : (byte)230;
+            return (v2, v2, v2);
+        });
+
+        var result = _detector.Detect(frame, W, H, Stride);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(0.0, result.ChatListRect.X);
+        Assert.Equal(RailSide.Left, result.DetectedRailSide);
+        // Tie: both widths are equal (both sides hit content at the same depth),
+        // so neither side beats the other and the LTR fallback applies.
+        Assert.Equal(result.RailSideLeftWidth, result.RailSideRightWidth);
+    }
+
+    // Test 11: Narrow uniform scrollbar strip at the right outer edge should not defeat
+    // a proper 50-px rail on the left.  The scrollbar is vertically uniform (same colour
+    // top to bottom) so it looks quiet, but it is only ~5 px wide vs ~50 px for the rail.
+    [Fact]
+    public void Detect_RailOnLeft_WithRightScrollbar_StillAssignsChatListToLeft()
+    {
+        const int W = 1280, H = 800, Stride = W * 4;
+        var frame = BuildFrame(W, H, Stride, (x, y) =>
+        {
+            if (x < 50)       // rail: uniform dark
+                return ((byte)30, (byte)30, (byte)30);
+            if (x >= 1275)    // scrollbar: uniform dark strip, only 5 px wide
+                return ((byte)50, (byte)50, (byte)50);
+            if (x < 640)      // chat list content
+            {
+                byte v = (y / 10) % 2 == 0 ? (byte)20 : (byte)70;
+                return (v, v, v);
+            }
+            // conversation content
+            {
+                byte v = (y / 10) % 2 == 0 ? (byte)180 : (byte)230;
+                return (v, v, v);
+            }
+        });
+
+        var result = _detector.Detect(frame, W, H, Stride);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(0.0, result.ChatListRect.X);
+        // Rail width on left (~50) must exceed scrollbar width on right (~5).
+        Assert.True(result.RailSideLeftWidth > result.RailSideRightWidth,
+            $"leftWidth={result.RailSideLeftWidth}, rightWidth={result.RailSideRightWidth}");
     }
 
     // Test 7: A "highlighted chat" row produces a high delta at y=H/2 only.
