@@ -12,6 +12,31 @@ definition and CHANGELOG.md for full v0.1.x development history.
 
 ## Last session summary
 
+**2026-05-02 — v0.2.0 Session A: detection plumbing (branch v0.2.0-detection-plumbing).**
+
+Wired `WhatsAppRegionDetector` into the live capture path. Detection only — no clip
+changes, no scope-aware blur, no balloons. Visual behavior is unchanged.
+
+**GPU→CPU readback.** Added `IBlurStagingTexture` / `Win2DBlurStagingTexture` and two new
+`IBlurInterop` methods: `CreateStagingTexture` (D3D11_USAGE_STAGING / D3D11_CPU_ACCESS_READ)
+and `TryReadBgra` (CopyResource + Map/Unmap via vtable-dispatch delegates at slots 47/14/15;
+Flush at 111 before the copy). `BlurPipeline` manages the staging texture's lifecycle
+(allocated on first read, reused on same dimensions, reallocated on resize, disposed with the
+pipeline). `Win2DCachedFrame` creation changed to the explicit D3D11 texture path (same as
+`Win2DBlurRenderTarget`) so the backing `IDirect3DSurface` is available for the QI chain.
+
+**Detector triggering.** `TrayOrchestrator` gains `IRegionDetector` as an 8th constructor
+dependency (wired in `App.xaml.cs` with `new WhatsAppRegionDetector()`). Detection fires on
+the first successfully blurred frame (Interlocked one-shot flag; dispatched to UI thread with
+`_setupGeneration` guard against stale-session writes) and on every `BoundsChanged` event.
+Results are stored in `_lastDetectionResult` (private, `internal` accessor `LastDetectionResult`
+for tests). Logged via `StartupLog.Info` on both success and failure.
+
+**Tests.** 6 new `BlurPipelineTests` (readback lifecycle: first-read allocates, reuse, resize,
+dispose). 4 new `TrayOrchestratorTests` (first-frame detection, second-frame no-op, BoundsChanged,
+readback-fail skip). `FixedResultDetector` helper avoids NSubstitute's `ReadOnlySpan<byte>` limitations.
+Counts: Core 85/85, App 50/50 (x64). Build: 0 errors, 0 warnings.
+
 **2026-05-02 — RTL rail-side detection (issue #30).**
 
 Fixed the LTR-only chat-list assignment bug filed as issue #30.
@@ -54,19 +79,16 @@ WGC capture border, TFM bump to 22621)** — see HISTORY.md for full notes.
 
 ## Next up
 
-**v0.2.0 — "The right regions"** remaining items. `IAppProfile`, blur-intensity presets,
-AddDirtyRect + InvalidateVisual repaint improvements, region scope submenu scaffold,
-edge-fade fix, pixel-region occlusion clipping, and the region detector module are all done.
+**v0.2.0 Session B — consume detection results.**
 
-Pick one for the next session:
+Detection now runs and results are stored. Session B consumes `_lastDetectionResult` to drive:
+- `OverlayWindow.SetClip` / `ApplyRegionClip` — scope-aware blur (chat list, conversation, both)
+- Coordinate-space conversion utilities (frame-pixel rects → DIP overlay-local rects)
+- Balloon or log notification when detection fails on a production frame
+- `RegionDump` annotation update (optional tidy)
 
-v0.2.0 remaining work (no required order):
-
-- Smoke test on 3 different WhatsApp Desktop layouts (default, narrow, wide) — verifies
-  the v0.2.0 features that ARE wired (occlusion clipping, intensity presets, edge-fade fix).
-  Does not require region detection to be wired.
-- Wire RegionDetector into BlurPipeline / OverlayWindow / tray submenu — issue #30
-  (RTL assignment) is now resolved; wiring is unblocked.
+All pre-existing v0.2.0 work (occlusion clipping, intensity presets, edge-fade fix, region scope
+submenu scaffold) remains working and unchanged.
 
 ## Blockers
 

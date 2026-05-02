@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Internal: region detection now runs on the first captured frame and on every WhatsApp
+  resize; results are stored but not yet used to drive blur scope or clip behavior.
 - Blur region scope submenu: tray menu "Blur region" with three options — "Chat list",
   "Conversation", and "Both" (default). Selected scope is stored in the orchestrator;
   region-aware blur behavior will be wired in when RegionDetector lands in v0.2.0.

@@ -10,6 +10,7 @@ using Gausslite.App.Tray;
 using Gausslite.Core.AppProfiles;
 using Gausslite.Core.Blur;
 using Gausslite.Core.Capture;
+using Gausslite.Core.Detection;
 using Gausslite.Core.WindowTracking;
 using Gausslite.Overlay;
 using Windows.Graphics.Capture;
@@ -63,6 +64,8 @@ public partial class App : Application
 
         _hotkeyService = new HotkeyService();
 
+        IRegionDetector regionDetector = new WhatsAppRegionDetector();
+
         try
         {
             StartupLog.Info("Constructing TrayOrchestrator...");
@@ -73,7 +76,8 @@ public partial class App : Application
                 overlayWindow,
                 _hotkeyService,
                 captureItemFactory,
-                appProfile);
+                appProfile,
+                regionDetector);
             StartupLog.Info("TrayOrchestrator constructed.");
         }
         catch (Exception ex)
@@ -207,6 +211,12 @@ public partial class App : Application
         public IBlurRenderTarget BlurFrame(ICaptureFrame frame)
             => throw new NotSupportedException("NullBlurPipeline does not process frames.");
         public IBlurRenderTarget? TryRenderCurrentFrame() => null;
+        public bool TryReadLatestFrameAsBgra(out byte[] bgraPixels, out int width, out int height, out int stride)
+        {
+            bgraPixels = Array.Empty<byte>();
+            width = height = stride = 0;
+            return false;
+        }
         public void Dispose() { }
     }
 }

@@ -6,6 +6,7 @@ using Gausslite.App.Hotkey;
 using Gausslite.Core.AppProfiles;
 using Gausslite.Core.Blur;
 using Gausslite.Core.Capture;
+using Gausslite.Core.Detection;
 using Gausslite.Core.Diagnostics;
 using Gausslite.Core.WindowTracking;
 using Gausslite.Overlay;
@@ -15,7 +16,7 @@ namespace Gausslite.App.Orchestration;
 
 /// <summary>
 /// Wires together <see cref="IWindowTracker"/>, <see cref="ICaptureEngine"/>,
-/// <see cref="IBlurPipeline"/>, and <see cref="IOverlayWindow"/>.
+/// <see cref="IBlurPipeline"/>, <see cref="IOverlayWindow"/>, and <see cref="IRegionDetector"/>.
 /// All public methods must be called from the WPF UI thread.
 /// </summary>
 public sealed class TrayOrchestrator : ITrayOrchestrator
@@ -30,6 +31,7 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
     private readonly IHotkeyService _hotkeyService;
     private readonly ICaptureItemFactory _captureItemFactory;
     private readonly IAppProfile _profile;
+    private readonly IRegionDetector _regionDetector;
     private readonly UiThreadDispatch _dispatchToUiThread;
     private readonly BackgroundDispatch _dispatchToBackground;
     private readonly BlurActivationStateMachine _activation = new();
@@ -46,6 +48,13 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
     private int _frameCount;
     private int _frameExceptionCount;
     private int _noOutputLogged;     // 0 = not yet logged, 1 = logged
+    private int _detectionDone;      // 0 = not yet run, 1 = run for this capture session
+
+    // Stores the most recent detection result.
+    // Written and read on the UI thread only — plain assignment is safe.
+    // Null means detection has never run in the current session.
+    private RegionDetectionResult? _lastDetectionResult;
+    internal RegionDetectionResult? LastDetectionResult => _lastDetectionResult;
 
     public event EventHandler<bool>? BlurStateChanged;
 
@@ -61,7 +70,8 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
         IOverlayWindow overlayWindow,
         IHotkeyService hotkeyService,
         ICaptureItemFactory captureItemFactory,
-        IAppProfile profile)
+        IAppProfile profile,
+        IRegionDetector regionDetector)
         : this(
             windowTracker,
             captureEngine,
@@ -70,6 +80,7 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
             hotkeyService,
             captureItemFactory,
             profile,
+            regionDetector,
             DispatchToWpfUiThread,
             DispatchToThreadPool)
     {
@@ -83,6 +94,7 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
         IHotkeyService hotkeyService,
         ICaptureItemFactory captureItemFactory,
         IAppProfile profile,
+        IRegionDetector regionDetector,
         UiThreadDispatch dispatchToUiThread,
         BackgroundDispatch? dispatchToBackground = null)
     {
@@ -93,6 +105,7 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
         _hotkeyService = hotkeyService;
         _captureItemFactory = captureItemFactory;
         _profile = profile;
+        _regionDetector = regionDetector;
         _dispatchToUiThread = dispatchToUiThread;
         _dispatchToBackground = dispatchToBackground ?? DispatchToThreadPool;
 
@@ -313,6 +326,10 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
             _captureEngine.Stop();
         }
 
+        // Reset detection flag so the first frame of the next capture session triggers detection.
+        Interlocked.Exchange(ref _detectionDone, 0);
+        _lastDetectionResult = null;
+
         HideOverlay(source);
         _windowTracker.SetOverlayWindowHandle(IntPtr.Zero);
         StartupLog.Info($"{source}: destroying OverlayWindow HWND");
@@ -402,6 +419,9 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
                 BeginEagerSetup("OnBoundsChanged");
 
             ApplyVisibilityForCurrentWindow("OnBoundsChanged");
+
+            // Re-run detection after the overlay has been moved so rects reflect the new layout.
+            RunDetection("OnBoundsChanged");
         });
     }
 
@@ -543,6 +563,29 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
         StartupLog.Info($"{source}: partial visibility — clip set to {localRects.Count} local rect(s)");
     }
 
+    // Reads the latest GPU frame back to the CPU and runs the region detector.
+    // Must be called on the UI thread — both trigger points (OnFrameArrived dispatch and
+    // OnBoundsChanged body) ensure this.  _lastDetectionResult is written here and read
+    // only on the UI thread, so plain assignment is safe.
+    private void RunDetection(string source)
+    {
+        if (!_blurPipeline.TryReadLatestFrameAsBgra(out var pixels, out var w, out var h, out var s))
+        {
+            StartupLog.Info($"{source}: detection skipped — no frame available for readback");
+            return;
+        }
+
+        var result = _regionDetector.Detect(pixels, w, h, s);
+        _lastDetectionResult = result;
+
+        if (result.Succeeded)
+            StartupLog.Info(
+                $"{source}: detection succeeded — rail={result.DetectedRailSide}, " +
+                $"chatList={result.ChatListRect}, conversation={result.ConversationRect}");
+        else
+            StartupLog.Info($"{source}: detection failed — {result.FailureReason}");
+    }
+
     private void TransitionToIdle(string source)
     {
         var previous = _activation.State;
@@ -652,6 +695,18 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
             }
 
             _overlayWindow.PresentFrame(blurred);
+
+            // Run detection once on the first successfully blurred frame.
+            // BlurFrame has updated _cachedInputFrame, so TryReadLatestFrameAsBgra can succeed.
+            // Capture _setupGeneration here (background thread) so a TearDownCaptureAndOverlay
+            // that executes before this lambda runs does not write stale layout data for the
+            // new session.
+            if (Interlocked.Exchange(ref _detectionDone, 1) == 0)
+            {
+                var gen = _setupGeneration;
+                _dispatchToUiThread("OnFrameArrived.Detection",
+                    () => { if (_setupGeneration == gen) RunDetection("OnFrameArrived"); });
+            }
         }
         catch (Exception ex)
         {

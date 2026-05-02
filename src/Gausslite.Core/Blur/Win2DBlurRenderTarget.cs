@@ -87,8 +87,7 @@ internal sealed class Win2DBlurRenderTarget : IBlurRenderTarget, INativeBlurRend
                 MiscFlags         = D3D11_RESOURCE_MISC_SHARED,
             };
 
-            var d3d11Device = (ID3D11Device)Marshal.GetObjectForIUnknown(d3d11DevicePtr);
-            int hr = d3d11Device.CreateTexture2D(ref desc, IntPtr.Zero, out texturePtr);
+            int hr = CreateTexture2DRaw(d3d11DevicePtr, ref desc, out texturePtr);
             Marshal.ThrowExceptionForHR(hr);
 
             // Step 3 — QI the texture for IDXGISurface, then wrap as WinRT IDirect3DSurface.
@@ -146,8 +145,7 @@ internal sealed class Win2DBlurRenderTarget : IBlurRenderTarget, INativeBlurRend
 
         try
         {
-            var dxgiAccess = (IDirect3DDxgiInterfaceAccess)Marshal.GetObjectForIUnknown(dxgiAccessPtr);
-            hr = dxgiAccess.GetInterface(in IID_ID3D11Device, out IntPtr d3d11DevicePtr);
+            hr = CallGetInterface(dxgiAccessPtr, in IID_ID3D11Device, out IntPtr d3d11DevicePtr);
             Marshal.ThrowExceptionForHR(hr);
             return d3d11DevicePtr; // caller must release
         }
@@ -157,33 +155,29 @@ internal sealed class Win2DBlurRenderTarget : IBlurRenderTarget, INativeBlurRend
         }
     }
 
-    // ── COM interface definitions ─────────────────────────────────────────────
+    // ── Vtable helpers ────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Exposes the native COM interfaces underlying a WinRT object (same pattern as in
-    /// <c>Gausslite.Overlay.Interop.ComInterop</c>; redefined here to avoid a Core→Overlay reference).
-    /// </summary>
-    [ComImport]
-    [Guid("A9B3D012-3DF2-4EE3-B8D1-8695F457D3C1")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface IDirect3DDxgiInterfaceAccess
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int GetInterfaceDelegate(IntPtr pThis, in Guid iid, out IntPtr ppvObject);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int CreateTexture2DDelegate(
+        IntPtr pDevice, ref D3D11_TEXTURE2D_DESC pDesc, IntPtr pInitialData, out IntPtr ppTexture2D);
+
+    private static int CallGetInterface(IntPtr dxgiAccessPtr, in Guid iid, out IntPtr result)
     {
-        [PreserveSig]
-        int GetInterface(in Guid iid, out IntPtr ppvObject);
+        IntPtr vtable = Marshal.ReadIntPtr(dxgiAccessPtr);
+        var fn = Marshal.GetDelegateForFunctionPointer<GetInterfaceDelegate>(
+            Marshal.ReadIntPtr(vtable, 3 * IntPtr.Size));
+        return fn(dxgiAccessPtr, iid, out result);
     }
 
-    /// <summary>
-    /// Minimal ID3D11Device vtable: only the first three own methods are needed here
-    /// (CreateBuffer, CreateTexture1D, CreateTexture2D — vtable slots 3–5 after IUnknown).
-    /// </summary>
-    [ComImport]
-    [Guid("db6f6ddb-ac77-4e88-8253-819df9bbf140")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface ID3D11Device
+    private static int CreateTexture2DRaw(IntPtr devicePtr, ref D3D11_TEXTURE2D_DESC desc, out IntPtr texture)
     {
-        [PreserveSig] int CreateBuffer(IntPtr pDesc, IntPtr pInitialData, out IntPtr ppBuffer);
-        [PreserveSig] int CreateTexture1D(IntPtr pDesc, IntPtr pInitialData, out IntPtr ppTexture1D);
-        [PreserveSig] int CreateTexture2D(ref D3D11_TEXTURE2D_DESC pDesc, IntPtr pInitialData, out IntPtr ppTexture2D);
+        IntPtr vtable = Marshal.ReadIntPtr(devicePtr);
+        var fn = Marshal.GetDelegateForFunctionPointer<CreateTexture2DDelegate>(
+            Marshal.ReadIntPtr(vtable, 5 * IntPtr.Size));
+        return fn(devicePtr, ref desc, IntPtr.Zero, out texture);
     }
 
     [StructLayout(LayoutKind.Sequential)]

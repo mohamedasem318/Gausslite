@@ -6,6 +6,115 @@
 
 ## Session history
 
+### 2026-05-02 — v0.2.0 Session A: detection plumbing
+
+**Goal.** Wire `WhatsAppRegionDetector` into the live capture path so detection runs on every
+first frame and on every WhatsApp resize. No visual behavior change. Session B will consume
+the results to drive scope-aware blur.
+
+---
+
+**GPU→CPU readback design.**
+
+The existing `BlurPipeline` keeps a `ICachedFrame` (`Win2DCachedFrame`, a Win2D
+`CanvasRenderTarget`) that holds the most recent captured frame for on-demand re-render.
+Reading it back to CPU requires a D3D11 staging texture.
+
+New types:
+- `IBlurStagingTexture` (interface, `float Width/Height + Dispose`) — manages lifetime.
+- `Win2DBlurStagingTexture` (internal) — wraps a raw `ID3D11Texture2D*` created with
+  `D3D11_USAGE_STAGING`, `D3D11_CPU_ACCESS_READ`, zero bind flags. Owns the COM pointer
+  and releases it on `Dispose`.
+
+New `IBlurInterop` methods:
+- `CreateStagingTexture(device, w, h) -> IBlurStagingTexture` — creates the staging
+  texture on the app's shared D3D11 device.
+- `TryReadBgra(device, cachedFrame, staging, out pixels, out w, out h, out stride) -> bool`
+  — gets the immediate context (vtable slot 40), flushes (slot 111) to avoid stale
+  frame data, calls `CopyResource` (slot 47) from source → staging, then `Map` (slot 14) /
+  `Marshal.Copy` / `Unmap` (slot 15). Returns `false` on any HRESULT failure.
+
+Source texture access: `Win2DCachedFrame` now stores an `IDirect3DSurface? Surface` property.
+The creation path in `Win2DBlurInterop.CreateCachedFrame` was changed from
+`new CanvasRenderTarget(device, w, h, 96f)` (Win2D-internal allocation, no surface handle)
+to the explicit D3D11 path (same as `Win2DBlurRenderTarget`): `CreateTexture2D` with
+`BIND_RENDER_TARGET | BIND_SHADER_RESOURCE` (no `MISC_SHARED` needed), QI for `IDXGISurface`,
+`CreateDirect3D11SurfaceFromDXGISurface`, then `CanvasRenderTarget.CreateFromDirect3D11Surface`.
+The stored `IDirect3DSurface` can be QI'd for `IDirect3DDxgiInterfaceAccess →
+GetInterface(IID_ID3D11Texture2D)` to get the source pointer for `CopyResource`.
+
+All vtable-dispatch infrastructure follows the existing `FlushD3D11Context` pattern:
+`[UnmanagedFunctionPointer(StdCall)]` delegates, `Marshal.ReadIntPtr(vtable, slot * IntPtr.Size)`,
+`Marshal.GetDelegateForFunctionPointer`. No new COM imports for `ID3D11DeviceContext` —
+the 47-stub placeholder approach was rejected as load-bearing noise.
+
+`BlurPipeline` lifecycle for `_stagingTexture`:
+- Allocated on first `TryReadLatestFrameAsBgra` call (when `_cachedInputFrame` is non-null).
+- Reused while `Width/Height` match `_cachedInputFrame`.
+- Discarded (null-ed) alongside `_cachedInputFrame` on dimension change in `BlurFrame`.
+- Reallocated on the next `TryReadLatestFrameAsBgra` call after a resize.
+- `Dispose()`d in `BlurPipeline.Dispose()` inside `_cacheLock`.
+
+---
+
+**Detector triggering design.**
+
+`TrayOrchestrator` gains `IRegionDetector _regionDetector` (8th ctor param, public ctor now
+8-arg, internal test ctor now 10-arg). `App.xaml.cs` wires `new WhatsAppRegionDetector()`.
+
+Two trigger points:
+
+1. **First frame** (`OnFrameArrived`, background thread):
+   After `BlurFrame` succeeds and `PresentFrame` is called, an Interlocked one-shot gate
+   (`_detectionDone`, pattern mirrors `_noOutputLogged`) dispatches a UI-thread lambda.
+   The lambda is guarded by `_setupGeneration` (captured on the background thread) so a
+   `TearDownCaptureAndOverlay` that runs before the lambda executes does not write stale
+   layout data into `_lastDetectionResult` for the new session.
+
+2. **Every `BoundsChanged`** (UI-thread body of `OnBoundsChanged`):
+   `RunDetection("OnBoundsChanged")` is called at the end of the dispatch lambda, after
+   overlay has been moved to the new bounds. Runs unconditionally; `TryReadLatestFrameAsBgra`
+   returns `false` before the first frame, producing a logged skip with no result written.
+
+`RunDetection` (UI-thread private helper):
+1. `_blurPipeline.TryReadLatestFrameAsBgra(out pixels, out w, out h, out stride)`
+2. If `false`: log "detection skipped — no frame available".
+3. `var result = _regionDetector.Detect(pixels, w, h, stride)`
+4. `_lastDetectionResult = result`
+5. Log `DetectedRailSide`, `ChatListRect`, `ConversationRect` on success; `FailureReason` on failure.
+
+`_detectionDone` is reset to 0 in `TearDownCaptureAndOverlay` (via `Interlocked.Exchange`)
+so detection re-fires on the first frame of the next session.
+
+`_lastDetectionResult` is `RegionDetectionResult?` (null = never run). Plain assignment —
+written and read on UI thread only. Exposed via `internal RegionDetectionResult? LastDetectionResult`.
+
+---
+
+**Tests.**
+
+`BlurPipelineTests` (6 new):
+- `BeforeAnyFrame_ReturnsFalse` — no `CreateStagingTexture` call.
+- `OnFirstRead_AllocatesStagingTexture` — `CreateStagingTexture` called once.
+- `SameDimensionsTwice_ReusesStagingTexture` — `CreateStagingTexture` called once total.
+- `AfterDimensionChange_ReallocatesStagingTexture` — called once per dimension pair; old staging disposed.
+- `Dispose_DisposeStagingTexture` — staging disposed when pipeline is.
+- `DelegatesToInterop` — `TryReadBgra` called; returned pixels/width/height/stride forwarded.
+
+`TrayOrchestratorTests` (4 new):
+- `FirstFrame_RunsDetectionAndStoresResult`
+- `FirstFrame_DetectionOnlyRunsOnce_SecondFrameDoesNotRerunDetect`
+- `BoundsChanged_RunsDetectionAgain`
+- `Detection_SkippedWhenReadbackFails_LastResultStaysNull`
+
+`FixedResultDetector` inner class: simple `IRegionDetector` implementation that increments a
+counter and returns a configurable result, avoiding NSubstitute limitations with `ReadOnlySpan<byte>`.
+
+Test counts: Core 85/85, App 50/50 (x64 Release). Build: 0 errors, 1 pre-existing Win2D
+AnyCPU warning.
+
+---
+
 ### 2026-05-02 — RTL rail-side detection (issue #30)
 
 **Root cause correction.**

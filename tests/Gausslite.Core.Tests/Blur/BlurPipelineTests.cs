@@ -188,4 +188,142 @@ public sealed class BlurPipelineTests
         Assert.Same(rt, result);
         _interop.Received(1).FlushDevice(Arg.Any<IBlurCanvasDevice>());
     }
+
+    // ── TryReadLatestFrameAsBgra ─────────────────────────────────────────────
+
+    [Fact]
+    public void TryReadLatestFrameAsBgra_BeforeAnyFrame_ReturnsFalse()
+    {
+        var pipeline = CreatePipeline();
+        pipeline.Initialize(_device);
+
+        var ok = pipeline.TryReadLatestFrameAsBgra(out _, out _, out _, out _);
+
+        Assert.False(ok);
+        _interop.DidNotReceive().CreateStagingTexture(
+            Arg.Any<IBlurCanvasDevice>(), Arg.Any<float>(), Arg.Any<float>());
+    }
+
+    [Fact]
+    public void TryReadLatestFrameAsBgra_OnFirstRead_AllocatesStagingTexture()
+    {
+        SetupFullPipeline(100, 100);
+        var pipeline = CreatePipeline();
+        pipeline.Initialize(_device);
+        pipeline.BlurFrame(MakeFrame(100, 100));
+
+        pipeline.TryReadLatestFrameAsBgra(out _, out _, out _, out _);
+
+        _interop.Received(1).CreateStagingTexture(Arg.Any<IBlurCanvasDevice>(), 100f, 100f);
+    }
+
+    [Fact]
+    public void TryReadLatestFrameAsBgra_SameDimensionsTwice_ReusesStagingTexture()
+    {
+        SetupFullPipeline(100, 100);
+        var pipeline = CreatePipeline();
+        pipeline.Initialize(_device);
+        pipeline.BlurFrame(MakeFrame(100, 100));
+
+        pipeline.TryReadLatestFrameAsBgra(out _, out _, out _, out _);
+        pipeline.TryReadLatestFrameAsBgra(out _, out _, out _, out _);
+
+        _interop.Received(1).CreateStagingTexture(Arg.Any<IBlurCanvasDevice>(), Arg.Any<float>(), Arg.Any<float>());
+    }
+
+    [Fact]
+    public void TryReadLatestFrameAsBgra_AfterDimensionChange_ReallocatesStagingTexture()
+    {
+        var rt1 = MakeRenderTarget(100, 100);
+        var rt2 = MakeRenderTarget(200, 200);
+        var cf1 = MakeCachedFrame(100, 100);
+        var cf2 = MakeCachedFrame(200, 200);
+        var st1 = Substitute.For<IBlurStagingTexture>();
+        st1.Width.Returns(100f); st1.Height.Returns(100f);
+        var st2 = Substitute.For<IBlurStagingTexture>();
+        st2.Width.Returns(200f); st2.Height.Returns(200f);
+
+        _interop.CreateRenderTarget(Arg.Any<IBlurCanvasDevice>(), 100f, 100f).Returns(rt1);
+        _interop.CreateRenderTarget(Arg.Any<IBlurCanvasDevice>(), 200f, 200f).Returns(rt2);
+        _interop.CreateCachedFrame(Arg.Any<IBlurCanvasDevice>(), 100f, 100f).Returns(cf1);
+        _interop.CreateCachedFrame(Arg.Any<IBlurCanvasDevice>(), 200f, 200f).Returns(cf2);
+        _interop.CreateStagingTexture(Arg.Any<IBlurCanvasDevice>(), 100f, 100f).Returns(st1);
+        _interop.CreateStagingTexture(Arg.Any<IBlurCanvasDevice>(), 200f, 200f).Returns(st2);
+
+        var pipeline = CreatePipeline();
+        pipeline.Initialize(_device);
+        pipeline.BlurFrame(MakeFrame(100, 100));
+        pipeline.TryReadLatestFrameAsBgra(out _, out _, out _, out _);
+
+        pipeline.BlurFrame(MakeFrame(200, 200));
+        pipeline.TryReadLatestFrameAsBgra(out _, out _, out _, out _);
+
+        _interop.Received(1).CreateStagingTexture(Arg.Any<IBlurCanvasDevice>(), 100f, 100f);
+        _interop.Received(1).CreateStagingTexture(Arg.Any<IBlurCanvasDevice>(), 200f, 200f);
+        st1.Received(1).Dispose(); // old staging texture disposed on resize
+    }
+
+    [Fact]
+    public void TryReadLatestFrameAsBgra_Dispose_DisposeStagingTexture()
+    {
+        SetupFullPipeline(100, 100);
+        var stagingTexture = Substitute.For<IBlurStagingTexture>();
+        stagingTexture.Width.Returns(100f);
+        stagingTexture.Height.Returns(100f);
+        _interop.CreateStagingTexture(Arg.Any<IBlurCanvasDevice>(), 100f, 100f).Returns(stagingTexture);
+
+        var pipeline = CreatePipeline();
+        pipeline.Initialize(_device);
+        pipeline.BlurFrame(MakeFrame(100, 100));
+        pipeline.TryReadLatestFrameAsBgra(out _, out _, out _, out _);
+
+        pipeline.Dispose();
+
+        stagingTexture.Received(1).Dispose();
+    }
+
+    [Fact]
+    public void TryReadLatestFrameAsBgra_DelegatesToInterop()
+    {
+        SetupFullPipeline(100, 100);
+        var fakePixels = new byte[100 * 100 * 4];
+        _interop.TryReadBgra(
+                Arg.Any<IBlurCanvasDevice>(), Arg.Any<ICachedFrame>(), Arg.Any<IBlurStagingTexture>(),
+                out Arg.Any<byte[]>(), out Arg.Any<int>(), out Arg.Any<int>(), out Arg.Any<int>())
+            .Returns(x => { x[3] = fakePixels; x[4] = 100; x[5] = 100; x[6] = 400; return true; });
+
+        var pipeline = CreatePipeline();
+        pipeline.Initialize(_device);
+        pipeline.BlurFrame(MakeFrame(100, 100));
+
+        var ok = pipeline.TryReadLatestFrameAsBgra(out var pixels, out var w, out var h, out var s);
+
+        Assert.True(ok);
+        Assert.Equal(fakePixels, pixels);
+        Assert.Equal(100, w);
+        Assert.Equal(100, h);
+        Assert.Equal(400, s);
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    private ICachedFrame MakeCachedFrame(float width, float height)
+    {
+        var cf = Substitute.For<ICachedFrame>();
+        cf.Width.Returns(width);
+        cf.Height.Returns(height);
+        return cf;
+    }
+
+    private void SetupFullPipeline(float width, float height)
+    {
+        var rt = MakeRenderTarget(width, height);
+        var cf = MakeCachedFrame(width, height);
+        var st = Substitute.For<IBlurStagingTexture>();
+        st.Width.Returns(width);
+        st.Height.Returns(height);
+        _interop.CreateRenderTarget(Arg.Any<IBlurCanvasDevice>(), width, height).Returns(rt);
+        _interop.CreateCachedFrame(Arg.Any<IBlurCanvasDevice>(), width, height).Returns(cf);
+        _interop.CreateStagingTexture(Arg.Any<IBlurCanvasDevice>(), width, height).Returns(st);
+    }
 }
