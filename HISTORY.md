@@ -6,6 +6,97 @@
 
 ## Session history
 
+### 2026-05-02 — RTL rail-side detection (issue #30)
+
+**Root cause correction.**
+The original session notes described issue #30 as "the narrower-side-equals-chat-list
+heuristic fails in wide mode." That was imprecise. Reading the code: `Detect()` always
+assigned `chatListRect` to the left panel, with no width comparison at all. Wide-mode LTR
+was never broken — the detector happened to be right because in LTR WhatsApp the chat
+list is always on the left, regardless of width. The actual failure was RTL layouts
+(Arabic, Hebrew), where WhatsApp mirrors the entire UI and the chat list moves to the
+right side of the divider.
+
+**First attempt and why it failed.**
+The first implementation measured horizontal-edge density in the outermost 15% strips.
+The rail side was expected to have denser icon edges than the conversation side. In practice
+this was inverted on real WhatsApp: an active conversation (chat bubbles, input bar,
+wallpaper) has far more horizontal edges than the sparse navigation rail. The conversation
+strip outscored the rail strip on every LTR frame tested.
+
+**Signal choice — vertical uniformity walk.**
+WhatsApp's navigation rail is the **outermost strip of solid uniform background** before
+chat content begins. Its columns are vertically uniform: the same background color repeats
+from top to bottom. Chat-list content (contact rows, avatars, timestamps) follows
+immediately after the rail, and has much higher row-to-row pixel variation. The conversation
+pane's outer edge may be quiet (empty background, no message bubbles near the frame
+boundary), but unlike the rail side it has no fixed chat-list boundary to mark.
+
+The algorithm: walk inward from each outer edge column-by-column (skipping the top 30 px
+title-bar area and the outermost 5 px border). For each column, count sampled rows where
+`RowDelta(x, y) > EdgeStrengthThreshold` — the vertical-edge strength (L1 B+G+R delta
+between adjacent rows at column x). When this count reaches `busyThreshold` (25% of
+effective rows), that column is the first "content" column; the number of quiet columns
+before it is the rail-width estimate for that side.
+
+**Key invariant: default is 0, not maxSearch.** If no content column is found within the
+search range, the estimate defaults to 0 (no evidence), not to the search limit. This
+prevents a featureless conversation background that exhausts the search range from
+impersonating a wide quiet zone. A genuine rail always has a chat-list boundary within
+the search range; a flat background that runs to the limit scores 0.
+
+The side with the larger estimate is the rail side. Ties → LTR (Left) fallback.
+
+**Search range.** `maxSearch = min(200 px, 40% × frameWidth)`. The 200 px ceiling is
+necessary because the rail + chat-list margin is ~92 px regardless of window width. A
+fraction-only limit (e.g. 10%) would give only 80 px on an 806 px frame — too short to
+reach the first content column. The 40% cap ensures the scan never crosses the divider.
+
+**Validation on live WhatsApp.**
+`tools/RegionDump` was extended with a `Rail side: (left=Xpx, right=Ypx)` diagnostic line.
+Results across six captures (LTR English + RTL Arabic, default/narrow/wide each):
+
+| Layout | Frame | Rail side | Left quiet | Right quiet |
+|---|---|---|---|---|
+| LTR default | 1269×793 | **Left** ✓ | 92 px | 0 px |
+| LTR narrow | 806×793 | **Left** ✓ | 92 px | 0 px |
+| LTR wide | 1886×993 | **Left** ✓ | 92 px | 0 px |
+| RTL default | 1269×793 | **Right** ✓ | 0 px | 95 px |
+| RTL narrow | 806×793 | **Right** ✓ | 0 px | 95 px |
+| RTL wide | 1886×993 | **Right** ✓ | 0 px | 95 px |
+
+Rail-width estimate is consistent at 92–95 px across all window sizes, confirming the
+signal is stable. Annotated PNGs verified visually: green CHAT LIST box on the correct
+side (left in LTR, right in RTL) in all six captures.
+
+**Implementation.**
+`DetermineRailSide(pixels, stride, frameWidth, frameHeight)` private static method added
+to `WhatsAppRegionDetector`. `RowDelta(x, y)` helper measures L1 B+G+R delta between
+(x, y-1) and (x, y) — the symmetric transpose of the existing `ColumnDelta` helper.
+`RailSide` enum (`Left`, `Right`) added as a new type in `Gausslite.Core.Detection`.
+`RegionDetectionResult` gains `DetectedRailSide`, `RailSideLeftWidth`, `RailSideRightWidth`
+(the raw estimates for diagnostics and downstream confidence checks). The `Fail()` helper
+returns defaults (`Left`, both widths 0) without change.
+
+**Tests.**
+Four new tests in `WhatsAppRegionDetectorTests.cs` (11 Detection tests total). Synthetic
+frames use vertically uniform columns for the rail (no row-to-row variation) and
+10-row-period alternating bands for content (maximum row-to-row variation at the sample
+stride), so each test directly exercises the signal the algorithm relies on.
+
+- `Detect_RailOnLeft_AssignsChatListToLeft` — 50 px uniform rail on left; asserts
+  `leftWidth > rightWidth` and `ChatListRect.X == 0`.
+- `Detect_RailOnRight_AssignsChatListToRight` — 50 px uniform rail on right; asserts
+  `rightWidth > leftWidth`, `ChatListRect.X == 400`, `ConversationRect.X == 0`.
+- `Detect_NoRailSignalEitherSide_DefaultsToLeft` — content starts immediately on both
+  edges; asserts `leftWidth == rightWidth` (tie → LTR fallback).
+- `Detect_RailOnLeft_WithRightScrollbar_StillAssignsChatListToLeft` — 50 px uniform rail
+  left, 5 px uniform scrollbar right; asserts `leftWidth(50) > rightWidth(5)` → Left.
+
+Test counts: Core 79/79, App 46/46 (x64). Build: 0 errors, 0 warnings.
+
+---
+
 ### 2026-05-02 — Region detection arc: UIA recon, CV detector, smoke tool
 
 **UiaDump recon.**

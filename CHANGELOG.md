@@ -17,9 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a cached input frame (`ICachedFrame`) enables on-demand re-render when the preset
   changes.
 - `WhatsAppRegionDetector` internal module: pure-C# CV detector that locates the
-  chat-list/conversation boundary in captured BGRA frames via three-row vertical-divider
-  edge consensus. Lays the groundwork for region-aware blur; not yet wired into the blur
-  pipeline or tray menu (pending resolution of issue #30 — wide/RTL heuristic).
+  chat-list/conversation boundary in captured BGRA frames via vertical-divider edge
+  consensus combined with rail-side detection. Lays the groundwork for region-aware blur;
+  not yet wired into the blur pipeline or tray menu.
 - `tools/UiaDump`: diagnostic utility that dumps WhatsApp's UI Automation tree;
   used to confirm that WhatsApp Desktop is a WebView2 shell whose chat content is
   invisible to UIA.
@@ -45,6 +45,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still hides the overlay; fully-visible case applies no clip.
 
 ### Fixed
+- Region detection now correctly identifies the chat list and conversation panes in RTL
+  languages (Arabic, Hebrew) by detecting which side of the window has the navigation
+  rail. The detector walks inward from each outer edge and measures how far it can travel
+  before hitting vertically non-uniform (content) columns; the side with the wider
+  uniform zone is the rail side. Previously the detector always labelled the left panel
+  as chat list, which was wrong when WhatsApp's in-app language is set to an RTL
+  language and the chat list appears on the right. Validated on live WhatsApp in both
+  LTR (English) and RTL (Arabic) modes across default, narrow, and wide layouts.
+
 - Solid-colour flash eliminated when dragging WhatsApp. The overlay used to briefly
   show the dark placeholder colour on every position change because
   `BoundsOutgrewLastBlurredFrame` compared DIP overlay width (1294) against the WGC

@@ -12,37 +12,42 @@ definition and CHANGELOG.md for full v0.1.x development history.
 
 ## Last session summary
 
-**2026-05-02 — Region detection arc: UIA recon, CV detector, smoke tool.**
+**2026-05-02 — RTL rail-side detection (issue #30).**
 
-Three deliverables shipped across this arc.
+Fixed the LTR-only chat-list assignment bug filed as issue #30.
 
-**UiaDump recon tool.** `tools/UiaDump/` is a standalone diagnostic that dumps
-WhatsApp's full UI Automation tree to console. Finding: WhatsApp Desktop is a
-WebView2 shell — the UIA tree stops at the `WebView2` boundary and chat content
-(message list, chat header, contact list) is invisible to UIA. This invalidated
-the original v0.2.0 plan of "UIA primary, CV fallback."
+**Root cause correction.** The previous session notes described the bug as "narrower
+side = chat list heuristic fails in wide mode." That description was inaccurate — the
+actual code always assigned the *left* panel as chat list regardless of width. Wide-mode
+LTR was never broken. The real failure was RTL layouts (Arabic, Hebrew) where WhatsApp
+mirrors the UI and the chat list appears on the right.
 
-**WhatsAppRegionDetector (CV-primary).** Following the UIA-to-CV pivot,
-`src/Gausslite.Core/Detection/WhatsAppRegionDetector` was built as a pure-C#
-region detector with no third-party CV dependencies. It operates on BGRA frames
-already captured by the blur pipeline and uses three-row vertical-divider edge
-consensus to locate the boundary between the chat-list and conversation panes.
-Returns two `Rect` values in window coordinate space. 7 unit tests, all passing.
+**Rail-side detection algorithm.** `WhatsAppRegionDetector.Detect()` runs a
+`DetermineRailSide` step after finding the divider. It walks inward from each outer
+edge column-by-column (skipping the top 30 px title-bar area and the outermost 5 px
+border), counting sampled rows where `RowDelta(x, y) > 30`. When a column's busy-row
+count reaches 25% of effective frame rows, that column is the first "content" column
+and the walk stops. The width of the quiet zone before that stop is the rail-width
+estimate. The side with the larger estimate is the rail. If neither side finds a
+content column in the search range the default is 0 (no evidence), preventing
+a featureless background from impersonating a wide rail. Ties → LTR (Left) fallback.
+Search range: min(200 px, 40 % of frame width) — fixed-pixel ceiling ensures the
+scan reaches chat-list content even on narrow windows where a fraction-based limit
+would fall short.
 
-**RegionDump smoke tool.** `tools/RegionDump/` is a standalone smoke-test utility
-that captures one WhatsApp frame, runs the detector, and saves both a raw PNG and
-an annotated PNG (detected boundary drawn). Eyeball-verified on default, narrow,
-and wide LTR English WhatsApp Desktop layouts.
+**Validated on live WhatsApp (LTR English and RTL Arabic), three layouts each:**
+- LTR: left quiet ≈ 92 px, right quiet = 0 → Rail=Left ✓ (all widths)
+- RTL: left quiet = 0, right quiet ≈ 95 px → Rail=Right ✓ (all widths)
+Annotated PNGs confirmed green=CHAT LIST on the correct side.
 
-**Known limitation — deferred wiring.** The chat-list-vs-conversation assignment
-heuristic (narrower side = chat list) is wrong in wide mode, where the conversation
-pane can be wider than the chat list. Filed as GitHub issue #30
-(https://github.com/mohamedasem318/Gausslite/issues/30); proposed fix is
-horizontal-edge density analysis. Wiring the detector into BlurPipeline,
-OverlayWindow, and the tray submenu is deliberately deferred until the heuristic
-is resolved. The tray "Blur region" submenu remains a no-op.
+**New types.** `RailSide` enum (`Left`, `Right`) in `Gausslite.Core.Detection`.
+`RegionDetectionResult` gains `DetectedRailSide`, `RailSideLeftWidth`, and
+`RailSideRightWidth` for downstream callers and diagnostics.
 
-Test counts: Core 68/68, App 46/46 (x64). Build: 0 errors, 1 pre-existing Win2D AnyCPU warning.
+**4 unit tests** (11 Detection tests total): RailOnLeft, RailOnRight (the RTL case),
+NoRailSignal_DefaultsToLeft, RailOnLeft_WithRightScrollbar.
+
+Test counts: Core 79/79, App 46/46 (x64). Build: 0 errors, 0 warnings.
 
 **Previous sessions (2026-05-02 — Edge-fade fix, occlusion clipping, idle repaint,
 WGC capture border, TFM bump to 22621)** — see HISTORY.md for full notes.
@@ -60,9 +65,8 @@ v0.2.0 remaining work (no required order):
 - Smoke test on 3 different WhatsApp Desktop layouts (default, narrow, wide) — verifies
   the v0.2.0 features that ARE wired (occlusion clipping, intensity presets, edge-fade fix).
   Does not require region detection to be wired.
-- Wire RegionDetector into BlurPipeline / OverlayWindow / tray submenu — optional v0.2.0
-  extension; currently deferred. Depends on resolving issue #30 first (wide/RTL heuristic
-  wrong), or shipping with the known limitation documented.
+- Wire RegionDetector into BlurPipeline / OverlayWindow / tray submenu — issue #30
+  (RTL assignment) is now resolved; wiring is unblocked.
 
 ## Blockers
 
@@ -72,12 +76,12 @@ None.
 
 (See `PLAN.md` Decisions Log for the full history.)
 
-- **2026-05-02 — Region detector wiring deferred until issue #30 is resolved.**
-  The detector module is built and tested, but the chat-list-vs-conversation
-  assignment heuristic (narrower side = chat list) produces wrong results in
-  wide mode and RTL layouts. Wiring a region-aware blur that mis-identifies
-  which pane is which is worse than no region-aware blur. Defer wiring until the
-  heuristic is replaced with horizontal-edge density analysis (see issue #30).
+- **2026-05-02 — Region detector wiring deferred; issue #30 resolved.**
+  The detector was originally wiring-deferred because the chat-list assignment was
+  purely positional (left panel = chat list) and therefore wrong for RTL layouts.
+  Issue #30 is now fixed: `DetermineRailSide` uses horizontal-edge density in the
+  outer 15 % strips to find the navigation-rail side and assigns panes accordingly.
+  Wiring into BlurPipeline / OverlayWindow / tray submenu remains the next step.
 
 - **2026-05-02 — Pivoted from UIA-primary-with-CV-fallback to CV-only.**
   `tools/UiaDump` recon confirmed WhatsApp Desktop is a WebView2 shell; UIA cannot

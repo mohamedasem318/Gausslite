@@ -298,9 +298,13 @@ static void PrintSummary(
 
     if (detection.Succeeded)
     {
-        int dividerX = (int)detection.ChatListRect.Right;  // == ConversationRect.Left
+        // Divider is where the two panels meet: max of the two Left values (one is always 0).
+        int dividerX = (int)Math.Max(detection.ChatListRect.X, detection.ConversationRect.X);
         Console.WriteLine("Detection:    SUCCEEDED");
         Console.WriteLine($"Divider x:    {dividerX}");
+        Console.WriteLine($"Rail side:    {detection.DetectedRailSide}  " +
+                          $"(left quiet={detection.RailSideLeftWidth}px, " +
+                          $"right quiet={detection.RailSideRightWidth}px)");
         Console.WriteLine($"Chat list:    ({(int)detection.ChatListRect.X}, " +
                           $"{(int)detection.ChatListRect.Y}, " +
                           $"{(int)detection.ChatListRect.Width}, " +
