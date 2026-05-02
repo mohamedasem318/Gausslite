@@ -157,6 +157,78 @@ static (byte[] pixels, int width, int height, int stride)? CaptureOneFrame(
     return result!.Value;
 }
 
+static void SaveRawPng(byte[] pixels, int width, int height, int stride, string path)
+{
+    using var bmp   = new Bitmap(width, height, PixelFormat.Format32bppArgb);
+    var bmpData     = bmp.LockBits(
+        new Rectangle(0, 0, width, height),
+        ImageLockMode.WriteOnly,
+        PixelFormat.Format32bppArgb);
+    for (int y = 0; y < height; y++)
+        Marshal.Copy(pixels, y * stride,
+            IntPtr.Add(bmpData.Scan0, y * bmpData.Stride), width * 4);
+    bmp.UnlockBits(bmpData);
+    bmp.Save(path, ImageFormat.Png);
+}
+
+static void SaveAnnotatedPng(
+    byte[] pixels, int width, int height, int stride,
+    RegionDetectionResult detection, string path)
+{
+    using var bmp = new Bitmap(width, height, PixelFormat.Format32bppArgb);
+    var bmpData   = bmp.LockBits(
+        new Rectangle(0, 0, width, height),
+        ImageLockMode.WriteOnly,
+        PixelFormat.Format32bppArgb);
+    for (int y = 0; y < height; y++)
+        Marshal.Copy(pixels, y * stride,
+            IntPtr.Add(bmpData.Scan0, y * bmpData.Stride), width * 4);
+    bmp.UnlockBits(bmpData);
+
+    using var g = Graphics.FromImage(bmp);
+    g.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceOver;
+
+    using var labelFont = new Font("Consolas", 12f, FontStyle.Regular, GraphicsUnit.Point);
+    using var textBrush = new SolidBrush(Color.White);
+    using var dimBrush  = new SolidBrush(Color.FromArgb(160, 0, 0, 0));
+
+    if (detection.Succeeded)
+    {
+        DrawRegionRect(g, detection.ChatListRect,     Color.Green, "CHAT LIST",    labelFont, textBrush, dimBrush);
+        DrawRegionRect(g, detection.ConversationRect, Color.Red,   "CONVERSATION", labelFont, textBrush, dimBrush);
+    }
+    else
+    {
+        const int bandH = 40;
+        g.FillRectangle(dimBrush, 0, 0, width, bandH);
+        string msg = $"DETECTION FAILED: {detection.FailureReason}";
+        using var failBrush = new SolidBrush(Color.Red);
+        using var failFont  = new Font("Consolas", 13f, FontStyle.Bold, GraphicsUnit.Point);
+        SizeF sz = g.MeasureString(msg, failFont);
+        g.DrawString(msg, failFont, failBrush,
+            (width - sz.Width) / 2f, (bandH - sz.Height) / 2f);
+    }
+
+    bmp.Save(path, ImageFormat.Png);
+}
+
+static void DrawRegionRect(
+    Graphics g, System.Windows.Rect rect, Color strokeColor, string label,
+    Font labelFont, SolidBrush textBrush, SolidBrush bgBrush)
+{
+    float x = (float)rect.X, y = (float)rect.Y;
+    float w = (float)rect.Width, h = (float)rect.Height;
+
+    using var pen = new Pen(strokeColor, 3f);
+    g.DrawRectangle(pen, x, y, w, h);
+
+    SizeF sz  = g.MeasureString(label, labelFont);
+    float bgW = sz.Width  + 6f;
+    float bgH = sz.Height + 2f;
+    g.FillRectangle(bgBrush, x, y, bgW, bgH);
+    g.DrawString(label, labelFont, textBrush, x + 3f, y + 1f);
+}
+
 // ── COM interfaces ────────────────────────────────────────────────────────────
 
 [ComImport]
