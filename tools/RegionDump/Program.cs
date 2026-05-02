@@ -200,7 +200,10 @@ static (byte[] pixels, int width, int height, int stride)? CaptureOneFrame(
         using var reference = buffer.CreateReference();
         unsafe
         {
-            var access = (IMemoryBufferByteAccess)reference;
+            // C#/WinRT returns WinRT.IInspectable wrappers, so a direct cast to
+            // [ComImport] IMemoryBufferByteAccess doesn't work. Use .As<T>() which
+            // performs QueryInterface through the WinRT interop layer.
+            var access = reference.As<IMemoryBufferByteAccess>();
             access.GetBuffer(out byte* ptr, out uint capacity);
             var pixels = new byte[capacity];
             Marshal.Copy((IntPtr)ptr, pixels, 0, (int)capacity);
