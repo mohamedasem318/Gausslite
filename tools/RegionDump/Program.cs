@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 using System.IO;
 using System.Runtime.InteropServices;
 using Gausslite.Core.AppProfiles;

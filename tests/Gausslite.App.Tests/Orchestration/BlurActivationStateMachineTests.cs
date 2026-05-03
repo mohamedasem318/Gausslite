@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 using Gausslite.App.Orchestration;
 
 namespace Gausslite.App.Tests.Orchestration;

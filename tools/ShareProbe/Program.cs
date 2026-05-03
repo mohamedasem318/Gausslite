@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 // ShareProbe — recon utility for v0.3.0 screen-share detection.
 //
 // Enumerates every visible top-level window and dumps a tab-separated row per

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-03
+
 ### Changed
 - Cold-start placeholder color softened from dark slate (RGB 32,44,51) to light
   neutral gray (RGB 220,222,220).  The placeholder is still fully opaque (privacy

@@ -1,116 +1,167 @@
 # Gausslite
 
-**Blur sensitive chats automatically when you're sharing your screen.**
+**Sharing your screen shouldn't expose your DMs.**
 
-Stop accidentally exposing private messages in screen-shared meetings.
-Gausslite detects when you're sharing your screen and applies a real GPU
-blur to chat regions — automatically, no hotkey required.
+Whether you're presenting to your professor while shit-talking them in the group
+chat, or in a work meeting and the friend chat is going off — Gausslite quietly
+blurs WhatsApp Desktop the moment you start sharing your screen.
 
-v0.x focuses on WhatsApp Desktop as the first target. Other chat clients
-may follow post-v1.0 based on user demand.
+![Gausslite auto-blur demo](docs/media/demo.gif)
 
-> **v0** is the overlay version: blur is visible to both you and viewers
-> during screen sharing (same tradeoff as browser blur extensions).
-> **v1** ships an Indirect Display Driver so blur appears only in the
-> shared stream while your real monitor stays untouched.
+> *Replace this GIF with the staged demo. Recommend ~3-5 seconds: WhatsApp
+> visible with fake DMs → click "Share Screen" in Zoom → blur snaps on. Tool:
+> [ScreenToGif](https://www.screentogif.com).*
 
 ---
 
-## Status
+## What it does
 
-🚧 **In development.** Not yet publicly released. v0.2.0 has shipped
-internally; public release is held until v0.x is feature-complete with
-a proper installer. Watch this repo for updates.
+Gausslite watches for active screen-share sessions in **Zoom**, **Microsoft
+Teams**, **Google Meet**, browser-based **Discord**, and any other browser
+share that uses WebRTC. The instant a share starts, it overlays a real
+GPU-accelerated Gaussian blur on WhatsApp Desktop. When the share ends, the
+blur disappears.
 
-## Why "Gausslite"?
+- **Auto-on, auto-off** — no toggle, no panic. Zero clicks.
+- **Real GPU blur** — Win2D-backed, not a flat opaque rectangle.
+- **Region-aware** — choose to blur the chat list, the open conversation, or
+  both (right-click tray → Blur region).
+- **Adjustable intensity** — Light / Medium / Heavy presets keep silhouettes
+  readable for *you* while staying unreadable to viewers.
+- **Manual override** — left-click the tray icon, the global hotkey
+  (Ctrl+Shift+B), or the menu always work. If you disable blur mid-share,
+  Gausslite quietly remembers and turns it back on next time you share.
+- **Tray-only** — no window clutter, no taskbar entry.
 
-Portmanteau of *Gaussian* (the blur) and *gaslighting* (what you're
-doing to your viewers when they see WhatsApp on your screen but can't
-read a word of it). The blur is real; the deniability is up to you.
+![Tray menu screenshot](docs/media/tray-menu.png)
 
-## Features
+> *Replace with a screenshot of the tray right-click menu.*
 
-- Automatic activation when screen sharing is detected (Zoom, Teams,
-  Meet, Discord, OBS)
-- Real GPU blur via Win2D, not opaque overlay rectangles
-- Auto-detects chat list and conversation regions in WhatsApp Desktop
-- Tray app, no window clutter
-- Toggle between blurring chat list, open conversation, or both
-- Adjustable blur intensity — keep silhouettes readable for yourself
-  while staying unreadable to viewers
-- Manual hotkey toggle as fallback
+## Get it
 
-## Roadmap
+Download the latest installer or portable zip from the
+[Releases page](https://github.com/mohamedasem318/Gausslite/releases/latest).
 
-- [x] **v0.1.0** — Overlay-based whole-window blur for WhatsApp Desktop
-- [x] **v0.1.1** — Renamed from internal codename, no functional changes
-- [x] **v0.2.0** — Region-aware blur (chat list vs. conversation),
-      intensity presets, partial-occlusion handling
-- [ ] **v0.3.0** — Auto-activation: detect screen-share clients and
-      which monitor/window they're capturing
-- [ ] **v0.4.0** — Settings window, blur intensity slider, auto-start
-      with Windows, settings persistence
-- [ ] **v0.5.0** — Toast notification blur during screen sharing
-- [ ] **v1.0.0** — Indirect Display Driver: blur appears only in the
-      shared stream; your real monitor stays untouched
+- **Installer** (`GausslliteSetup-X.Y.Z.exe`) — recommended for most users.
+  Adds Gausslite to your Start Menu, registers an uninstaller.
+- **Portable** (`Gausslite-X.Y.Z-portable.zip`) — unzip and run, no install.
 
-See [PLAN.md](PLAN.md) for the full milestone breakdown and
-architectural detail.
+> **Why does Windows warn me about this?**
+>
+> The installer isn't code-signed yet (signing certificates cost ~$300/year and
+> Gausslite is a passion project). On first run, Windows SmartScreen will say
+> *"Windows protected your PC"*. Click **More info → Run anyway** to proceed.
+> The warning will disappear on its own once enough users have downloaded the
+> file. If you'd rather not click through, build from source — see
+> [BUILDING.md](BUILDING.md).
 
 ## Requirements
 
-- Windows 10 version 1903+ or Windows 11
-- DirectX 11 capable GPU (any GPU from the last ~15 years)
-- WhatsApp Desktop installed (Microsoft Store or web download)
+- **Windows 11 22H2 (build 22621)** or newer.
+- **DirectX 11 capable GPU** (anything from the last ~15 years).
+- **WhatsApp Desktop** installed (Microsoft Store or Win32 build).
+- **x64** architecture. ARM64 support is on the roadmap.
 
-## Installation
+## What it doesn't do (yet)
 
-Pre-public. No installer is available yet. Public release with a signed
-installer is planned once v0.x is feature-complete.
+- **Discord desktop screen sharing is not auto-detected.** Discord renders its
+  share controls as Chromium web content invisible to standard Windows window
+  enumeration. Workarounds: use the global hotkey, the tray left-click, or
+  share via Discord-in-browser (which IS auto-detected).
+  Tracked: [#38](https://github.com/mohamedasem318/Gausslite/issues/38).
+- **Multi-monitor share-target detection.** If WhatsApp is on monitor 2 but
+  you only share monitor 1, Gausslite still blurs (privacy-first default).
+  Tracked: [#40](https://github.com/mohamedasem318/Gausslite/issues/40).
+- **Other chat clients** (Signal, Telegram, Slack DMs, etc.) — WhatsApp is
+  the v0.x focus. Multi-app support may follow post-v1.0 based on demand.
 
-If you're a contributor or early tester with repo access, see
-[docs/building.md](docs/building.md) for build instructions.
+## Why "Gausslite"?
 
-## Building from source
+Portmanteau of *Gaussian* (the blur) and *gaslighting* (what you're doing to
+your viewers when they see WhatsApp on your screen but can't read a word of
+it). The blur is real; the deniability is up to you.
 
-See [docs/building.md](docs/building.md).
+## Roadmap
+
+- [x] **v0.1.0** — Overlay-based whole-window blur for WhatsApp Desktop.
+- [x] **v0.1.1** — Renamed from internal codename, no functional changes.
+- [x] **v0.2.0** — Region-aware blur (chat list vs. conversation), intensity
+      presets, partial-occlusion handling, RTL support.
+- [x] **v0.3.0** — Auto-activation: detect Zoom / Teams / browser-based shares,
+      blur fires within ~2 s of share start, manual override sticks per share.
+- [ ] **v0.3.1** — Discord desktop detection
+      ([#38](https://github.com/mohamedasem318/Gausslite/issues/38)).
+- [ ] **v0.3.2** — Share-target detection: skip blur when WhatsApp is on a
+      non-shared monitor
+      ([#40](https://github.com/mohamedasem318/Gausslite/issues/40)).
+- [ ] **v0.4.0** — Settings window, blur intensity slider, auto-start with
+      Windows, settings persistence,
+      ["blur whenever any sharing app is running"](PLAN.md#v040--polish)
+      opt-in.
+- [ ] **v0.5.0** — Toast notification blur during screen sharing.
+- [ ] **v1.0.0** — Composite-window mode: share a Gausslite window that
+      renders the desktop with selective blur baked in. No drivers, no signing.
+- [ ] **v2.0.0** — Indirect Display Driver: phantom monitor as a separate
+      WDDM driver so the real monitor stays untouched. Requires code-signing.
+
+See [PLAN.md](PLAN.md) for milestone details and the architectural rationale
+behind the v0/v1/v2 split.
 
 ## License
 
-Gausslite is licensed under the [GNU Affero General Public License v3.0](LICENSE).
+Gausslite is licensed under the
+[GNU Affero General Public License v3.0](LICENSE). You're free to use,
+modify, and distribute the software, but any modified version — including
+running it as a network service — must be released under the same license
+with source available to its users.
 
-This means you are free to use, modify, and distribute this software,
-but any modified version — including those run as a network service —
-must be released under the same license with source code available to
-its users.
+**Need a non-AGPL license** for embedding in proprietary software or any
+other use case the AGPL doesn't accommodate? See [COMMERCIAL.md](COMMERCIAL.md)
+for commercial licensing terms.
+
+## Disclaimer
+
+Gausslite is an independent open-source project and is **not affiliated with,
+endorsed by, sponsored by, or connected to WhatsApp LLC, Meta Platforms, Inc.,
+or any of their subsidiaries**. "WhatsApp" is a trademark of WhatsApp LLC.
+Gausslite does not modify, repackage, or interfere with the WhatsApp
+application itself; it operates as a separate privacy utility that processes
+the visual output of windows on the user's own desktop. References to
+"WhatsApp" in this project's code, documentation, and user interface exist
+solely to identify the target application for the user's privacy convenience.
+
+This software is provided "as is", without warranty of any kind. The author
+assumes no liability for any consequences arising from the use of this
+software, including but not limited to: failure to blur sensitive content,
+incompatibility with future versions of WhatsApp Desktop, or any privacy
+incident occurring during screen sharing.
+
+## For developers
+
+- [BUILDING.md](BUILDING.md) — how to build from source, dependencies,
+  test commands, x64 quirks.
+- [CONTRIBUTING.md](CONTRIBUTING.md) — how to propose changes, what gets
+  merged, license assignment for contributors.
+- [PLAN.md](PLAN.md) — full milestone breakdown, architecture, decisions log.
+- [STATE.md](STATE.md) — current state and active work.
+- [HISTORY.md](HISTORY.md) — verbose session-by-session development notes.
+- [CHANGELOG.md](CHANGELOG.md) — user-facing release notes.
+- [tools/README.md](tools/README.md) — diagnostic / recon utilities used
+  during development. Not part of the shipped app.
 
 ## Citation
 
-If you use Gausslite in your work or build on top of it, an
-acknowledgment is appreciated but not legally required beyond what
-AGPL-3.0 mandates:
+If you use Gausslite in academic work or build on top of it, an
+acknowledgement is appreciated but not legally required beyond what AGPL-3.0
+mandates:
 
 > Assem, M. (2026). *Gausslite: Automatic chat blur for screen sharing.*
 > https://github.com/mohamedasem318/Gausslite
 
-## Disclaimer
-
-Gausslite is an independent open-source project and is **not affiliated
-with, endorsed by, sponsored by, or connected to WhatsApp LLC, Meta
-Platforms, Inc., or any of their subsidiaries**. "WhatsApp" is a
-trademark of WhatsApp LLC. Gausslite does not modify, repackage, or
-interfere with the WhatsApp application itself; it operates as a
-separate privacy utility that processes the visual output of windows on
-the user's own desktop. References to "WhatsApp" in this project's code,
-documentation, and user interface exist solely to identify the target
-application for the user's privacy convenience.
-
-This software is provided "as is", without warranty of any kind. The
-author assumes no liability for any consequences arising from the use of
-this software, including but not limited to: failure to blur sensitive
-content, incompatibility with future versions of WhatsApp Desktop, or
-any privacy incident occurring during screen sharing.
-
 ## Contact
 
-Mohamed Assem — [Portfolio](https://mohamedasem318.github.io/portfolio) · [LinkedIn](https://linkedin.com/in/mohamedasem318)
+Mohamed Assem — [Portfolio](https://mohamedasem318.github.io/portfolio) ·
+[LinkedIn](https://linkedin.com/in/mohamedasem318) ·
+`mohamedasem318@gmail.com`
+
+For commercial licensing, see [COMMERCIAL.md](COMMERCIAL.md).
