@@ -78,9 +78,15 @@ public sealed class OverlayWindow : IOverlayWindow
             Stretch             = Stretch.Fill,
         };
 
+        // Light neutral gray — approximates the average tone of a heavily-blurred
+        // bright UI (WhatsApp's mostly-white background dominates).  Replaces the
+        // earlier dark slate (RGB 32,44,51) which was visually distinct enough that
+        // the brief cold-start ShowPlaceholder→first-blurred-frame transition read as
+        // a jarring dark "flash" before blur appeared.  Privacy contract preserved
+        // (still fully opaque).
         _placeholder = new Border
         {
-            Background          = new SolidColorBrush(Color.FromRgb(32, 44, 51)),
+            Background          = new SolidColorBrush(Color.FromRgb(220, 222, 220)),
             HorizontalAlignment = HorizontalAlignment.Stretch,
             VerticalAlignment   = VerticalAlignment.Stretch,
             IsHitTestVisible    = false,

@@ -6,6 +6,269 @@
 
 ## Session history
 
+### 2026-05-03 — v0.3.0 first slice: screen-share auto-detection (Zoom, Teams, browser)
+
+**Context.** v0.2.0 has shipped (PR #34). Next milestone per PLAN.md is v0.3.0
+"Knows when to blur" — auto-activate blur when the user starts screen sharing.
+The full milestone bundles three layers of difficulty: (1) detect a sharing
+client is running, (2) detect they're *actively* sharing, (3) detect *what*
+they're sharing (which monitor / window). This session ships (1)+(2) for the
+high-value apps; (3) and Discord-desktop are deferred to follow-ups.
+
+---
+
+**Recon-driven signatures.** Wrote two console probe utilities and walked through
+real share sessions to capture ground-truth window signatures:
+
+- `tools/ShareProbe` — enumerates every visible top-level window and dumps
+  `(hwnd, pid, processName, className, title, isVisible, ownerHwnd, exStyle)` as
+  TSV. User ran it before/during a real share for Zoom, Teams, Discord (desktop),
+  and a Chrome-based Meet session.
+- `tools/DiscordProbe` — same idea but recursively walks child windows under each
+  Discord top-level window (depth-12 cap). Built after Discord's top-level recon
+  showed zero share-only signal — the theory being maybe Discord's share controls
+  are child windows.
+
+The diff (during − before) gave us:
+- **Zoom desktop**: a new top-level window appears during share, class
+  `ZPFloatToolbarClass` and title `"Screen sharing meeting controls"`. The class
+  is unique to Zoom; the title nails the specific share toolbar (vs other
+  ZPFloatToolbarClass instances Zoom uses for non-share controls like
+  `"Video layouts"`).
+- **Microsoft Teams desktop**: a new top-level window appears during share, class
+  `TeamsWebView` and title `"Sharing control bar | Microsoft Teams | Pinned window"`.
+  Class is the generic Teams shell (used for the main app window too); title is
+  the discriminator (anchor on `"Sharing control bar"`).
+- **Browser (Chrome / Edge / Chromium)**: a new top-level window appears during
+  share, class `Chrome_WidgetWin_1` and title `"meet.google.com is sharing your
+  screen."` (Meet) or `"<domain> is sharing your screen."` for any browser-based
+  WebRTC share. Process is `chrome` or `msedge` depending on the browser. One
+  signature catches Google Meet, browser-Zoom, browser-Teams, browser-Discord,
+  and anything else using `getDisplayMedia()`.
+- **Discord desktop**: zero diff. Both top-level enumeration AND recursive
+  child-window enumeration (depth 12) showed identical sets of windows during
+  and outside an active share. Discord renders its share UI as Chromium web
+  content inside the main `Chrome_WidgetWin_1` → `Chrome_RenderWidgetHostHWND`
+  bridge — invisible to GDI window enumeration at any depth. Decision: defer
+  Discord desktop to v0.3.1, with UIA tree-walking as the proposed approach.
+
+---
+
+**Architecture.** New `Gausslite.Core/ScreenShare/` module:
+
+- `ScreenShareState` enum — `Idle` / `Active`.
+- `ActiveShareEvidence` record — diagnostic payload `(AppName, ProcessName,
+  WindowClass, WindowTitle, Hwnd)`.
+- `IScreenShareDetector` — `event StateChanged`, `CurrentState`, `CurrentEvidence`,
+  `Start()` / `Stop()`. Disposable.
+- `ShareSignature` (internal) — three predicates (`ProcessNameMatches`,
+  `ClassNameMatches`, `TitleMatches`) plus an `AppName` label. `Matches(WindowInfo w)`
+  is `true` when all three predicates match.
+- `KnownShareSignatures` (internal) — three baked-in signatures (Zoom, Teams,
+  Browser) and an `All` array.
+- `WindowSignalScreenShareDetector` — concrete detector. Polls via an injected
+  `PollScheduler` delegate (production: `DispatcherTimer` on the WPF UI thread;
+  tests: capture-and-fire-manually). On each tick, calls
+  `IWin32Api.EnumerateVisibleWindows()`, matches against the signature set,
+  flips `CurrentState` only on transitions, and fires `StateChanged` only on
+  flips. Stop / Dispose halt the scheduler. Post-Dispose Start throws.
+
+`IWin32Api` gains `EnumerateVisibleWindows()` returning `IReadOnlyList<WindowInfo>`
+where `WindowInfo` is a new record `(Hwnd, ProcessId, ProcessName, ClassName, Title)`.
+The implementation reuses the existing `EnumWindows`+`GetClassName`+
+`GetWindowText`+`Process.GetProcessById` plumbing pattern from `FindWindowHandle`.
+
+---
+
+**TrayOrchestrator state machine.** Four new fields plus a re-entry guard:
+
+- `_shareIsActive` — mirrors detector's last-emitted state.
+- `_autoEnabledForCurrentShare` — set when the detector flipped `Idle→Active`
+  AND blur was off, so we turned it on. Cleared on `Active→Idle`.
+- `_userOverrodeForCurrentShare` — set when the user manually toggles blur during
+  an active share. Cleared on `Active→Idle`. The override balloon fires once per
+  share, on the first user disable.
+- `_preShareBlurWasOn` — captured at `Idle→Active`; informs whether share-end
+  should auto-restore.
+- `_isAutoToggle` — re-entry guard. Set to `true` while the auto-enable / auto-restore
+  paths call into `EnableBlur` / `DisableBlur`, so those public methods don't account
+  the call as a user override.
+
+**Transition logic:**
+- **`Idle → Active`** (`HandleShareStarted`): snapshot `_preShareBlurWasOn`. If
+  blur was off, set `_isAutoToggle`, call `EnableBlur` (suppresses the user-override
+  marking), clear `_isAutoToggle`, set `_autoEnabledForCurrentShare = true`. If
+  blur was already on, no auto action.
+- **`Active`** + user toggles blur (any direction): the public `EnableBlur` /
+  `DisableBlur` see `_shareIsActive && !_isAutoToggle` and set
+  `_userOverrodeForCurrentShare = true`. The disable path additionally checks
+  `_autoEnabledForCurrentShare && !_userOverrodeForCurrentShare` (state at entry —
+  i.e. first user disable) and fires the once-per-share balloon. Subsequent
+  toggles don't re-fire it because the override flag is now set.
+- **`Active → Idle`** (`HandleShareEnded`): snapshot `wasAutoEnabled` and
+  `userOverrode`, clear all three flags. If `(wasAutoEnabled && !userOverrode &&
+  IsBlurEnabled)`, auto-disable using the `_isAutoToggle` guard. Otherwise leave
+  blur as-is.
+
+This semantics gives the right behavior for all six scenarios:
+1. Pre-share off, share starts, no user action, share ends → blur off (restored).
+2. Pre-share off, share starts, user disables, share ends → blur off (user kept).
+3. Pre-share off, share starts, user disables, user re-enables, share ends →
+   blur on (last user action wins; override flag stays set).
+4. Pre-share on, share starts, no user action, share ends → blur on (no auto-action
+   was taken, nothing to restore).
+5. Pre-share on, share starts, user disables, share ends → blur off (no balloon
+   because `_autoEnabledForCurrentShare` is false).
+6. Two consecutive shares, override in #1 → flags reset at #1's end, balloon
+   can fire fresh in #2.
+
+The `_isAutoToggle` flag was added after a first-pass implementation produced
+two test failures: my initial `EnableBlur` set the override flag whenever
+`_shareIsActive` was true, which incorrectly marked the auto-enable's own
+`EnableBlur` call as a user override. The re-entry guard cleanly distinguishes
+auto-initiated from user-initiated toggles without splitting the public API.
+
+---
+
+**Tray UX.** `TrayIconHost` now wires `TaskbarIcon.LeftClickCommand` to a new
+`ToggleBlurCommand : ICommand` wrapper that calls
+`ITrayOrchestrator.ToggleBlur()`. Same code path as the tray menu's "Enable blur"
+item and the global hotkey, so override semantics, balloon firing, and state-machine
+behavior are identical regardless of which surface the user used.
+
+The override balloon copy: title `"Blur is off for this share"`, body `"We'll turn
+it back on automatically the next time you share your screen."` Fired via the
+existing `ITrayNotifier` from v0.2.0 — no interface change needed.
+
+Distinct on/off tray icon images is captured as a future cosmetic improvement
+in STATE.md "Next up"; not load-bearing for v0.3.0.
+
+---
+
+**App composition root.** `App.xaml.cs` constructs a
+`WindowSignalScreenShareDetector` after `Win32Api`, wires it into the orchestrator
+via the new `SetScreenShareDetector` post-construction setter (mirrors the existing
+`SetTrayNotifier` pattern), and starts it after `TrayIconHost.Initialize`. The
+production poll scheduler creates a `DispatcherTimer` at `DispatcherPriority.Background`
+on the UI dispatcher with the requested interval. `OnExit` disposes the detector
+before the orchestrator. Detector start failures are caught and logged as warnings
+— non-fatal, so a detector failure doesn't kill the app, it just falls back to
+manual-only blur control.
+
+---
+
+**Occlusion override during active share — discovered via smoke test.** First-pass
+smoke test of the Zoom share path exposed a privacy bug. The detector correctly fired
+`Active` and the orchestrator correctly called auto-`EnableBlur`, but the user reported
+no visible blur during the share. Log analysis showed the orchestrator's state stayed
+at `Armed` (overlay parked offscreen) for the entire ~12-second share, only briefly
+flipping to `Active` for ~70 ms at share-end before the auto-disable fired.
+
+Root cause: Zoom drops many small floating overlays on top of WhatsApp during a share
+— share-control toolbar (`ZPFloatToolbarClass`), video tiles (`VideoFrameWndClass`),
+layout selector (`ZPFloatControlPanelMgrClass`), annotation panel
+(`ZPAnnotatePanelClass`), `TransparentOverlayWindow`, and others. v0.2.0's
+`WindowTracker.ComputeVisibleRegion` walks the Z-order above WhatsApp and subtracts
+each window's bounds. With Zoom's overlay zoo above WhatsApp, the subtraction
+fragments the visible region to zero — even though most of those overlays are small
+or visually translucent and WhatsApp's pixels are clearly visible around / through
+them. Result: bounds-based occlusion incorrectly reported "fully occluded", the
+overlay was hidden, and WhatsApp pixels leaked unblurred into the shared stream.
+Worse: this is a privacy bug, not just a UX bug — viewers of the share would see
+WhatsApp content despite blur being "on".
+
+Fix: while `_shareIsActive` is true, the orchestrator overrides occlusion logic and
+treats WhatsApp as fully visible regardless of Z-order:
+- `HasVisibleRegion()` returns `true` unconditionally during a share.
+- `OnVisibleRegionChanged` skips the `fullyOccluded → TransitionToArmed + HideOverlay`
+  branch when `_shareIsActive`.
+- New `EffectiveVisibleRegion()` helper returns `[_lastKnownBounds]` during a share,
+  used by `RecomputeAndApplyClip` so the clip computation sees full coverage.
+
+Privacy-first rationale: worst case is some over-blur in regions truly covered by
+Zoom's UI — but viewers of the share see Zoom's UI there anyway, so the over-blur
+is invisible to them. Outside of an active share, `_shareIsActive` is false and the
+v0.2.0 occlusion behavior is preserved unchanged.
+
+Two new tests (`ShareActive_VisibleRegionDropsToZero_OverlayStaysOn`,
+`NoShare_VisibleRegionDropsToZero_OverlayHides`) lock down both the override and the
+preserved v0.2.0 behavior. Existing v0.2.0 occlusion-clip tests still pass —
+`_shareIsActive = false` is the default, so they exercise the unchanged path.
+
+---
+
+**Cold-start repaint nudge — discovered via second smoke test.** Second smoke (after
+the occlusion-override fix) confirmed visible blur during share for all 4 apps, but
+the user reported a perceived "extra delay" on Teams: "needs an actual change on
+WhatsApp's frame to actually apply the blur". The blur-intensity bug fixed in v0.2.0
+had the same shape — visual update lagged until WhatsApp produced a fresh WGC frame.
+
+Log analysis ruled out Teams-specific slowness: the placeholder→first-blurred-frame
+transition timing was consistent across apps (Zoom 432 ms, Teams session 1 241 ms,
+Teams session 2 184 ms, Meet 322 ms), with Teams actually being fastest. Root cause
+was WGC's lazy frame delivery: WGC only emits a frame when the captured window
+actually paints. If WhatsApp is idle at the moment the capture session is set up
+(no animations, cursor not over it), the user sees the privacy placeholder until
+WhatsApp paints on its own — typically when the cursor enters it or it receives a
+new message.
+
+Fix: `HandleShareStarted` calls `_windowTracker.RequestRepaintOfTrackedWindow()`
+after auto-`EnableBlur` returns. This invalidates WhatsApp's client area
+cross-process, queueing a paint that WGC can capture as soon as the session
+subscribes to FrameArrived. Same mechanism as v0.2.0's snap-resize fix. The nudge
+runs only on the auto-enable code path; when the share starts and blur was already
+on, the existing capture session is producing frames and no nudge is needed.
+
+Two new tests (`ShareStarts_AutoEnable_RequestsRepaintOfTrackedWindow`,
+`ShareStarts_BlurAlreadyOn_DoesNotRequestRepaint`) lock down the nudge condition.
+
+---
+
+**Tests.** 30 new tests bringing the suite from 102 + 84 = 186 to 128 + 98 = 226:
+
+- `WindowSignalScreenShareDetectorTests` (9): initial state is Idle with no
+  evidence; `Start` is idempotent (second call doesn't double-schedule); poll
+  with no matching window stays Idle and fires no event; poll with matching
+  window transitions to Active and fires once; stable Active across polls fires
+  no second event; Active→absent → fires Idle transition with cleared evidence;
+  empty signature set always reports Idle; `Stop` disposes the scheduled ticker;
+  `Dispose` after `Start` stops the ticker; `Start` after `Dispose` throws
+  `ObjectDisposedException`.
+- `KnownShareSignaturesTests` (16): per-app positive matches against synthetic
+  windows derived from the recon TSVs, plus negative cases (Zoom non-share
+  windows like `"Zoom Workplace"` / `"Zoom Meeting"`; Teams in-meeting windows;
+  Browser regular-tab titles; Browser process predicate excludes Discord even
+  though Discord uses the same Chromium widget class). Process-name comparisons
+  are case-insensitive (verified). Sanity test: `All` contains all three
+  signatures.
+- `TrayOrchestratorScreenShareTests` (16): the 12 baseline + 2 occlusion-override
+  + 2 cold-start-nudge tests. Driven by a `FakeScreenShareDetector` that lets each
+  test fire transitions deterministically without a real polling loop; uses the
+  existing inline-dispatch overload pattern.
+
+Counts: Core 128/128, App 98/98 (x64). Build: 0 errors, 1 pre-existing Win2D AnyCPU
+warning. Smoke test cycle: first smoke exposed the occlusion bug (fixed); second
+smoke confirmed visible blur but exposed cold-start placeholder latency (fixed via
+repaint nudge); third smoke pending to verify the latency improvement.
+
+---
+
+**Known limitation — Discord desktop.** Documented in CHANGELOG.md, STATE.md, and
+PLAN.md decisions log. Workarounds for users:
+- Discord-in-browser IS detected (Chrome signature).
+- Global hotkey (Ctrl+Shift+B) still works.
+- Tray left-click (newly wired) still works.
+- A future v0.4.0 "blur whenever any sharing app is running" opt-in setting will
+  cover this case heavy-handedly for users who use Discord desktop primarily.
+
+Path forward for v0.3.1 follow-up: write a `tools/UiaShareProbe` that walks
+Discord's main window UIA tree during a share, find a stable share-only element
+(likely a button named "Stop streaming" or a region named "You're sharing your
+screen"), and build a `UiaScreenShareDetector` that only runs when Discord is
+the active candidate (to limit CPU cost).
+
+---
+
 ### 2026-05-03 — v0.2.0 clip composition: forced-repaint nudge + known limitation
 
 **Context.** Smoke-test of the prior round (race-safe self-validation + delayed-retry) showed scope-aware clip mostly converges correctly on resize/maximize, but a residual "user must hover the cursor over WhatsApp" issue remained for some snap/resize scenarios. The log evidence: WhatsApp's `GetWindowRect` (used by `WindowTracker`) reported one size, but WGC kept delivering frames at a different size. Without a fresh WGC frame at the new size, the envelope check rejected every readback and detection couldn't run until the user provoked WhatsApp into emitting a paint by hovering.

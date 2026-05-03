@@ -1,0 +1,5 @@
+# Recon outputs from ShareProbe / DiscordProbe / UiaDump etc.
+# These can contain personal info (meeting titles, channel names, system window data)
+# and are diagnostic snapshots — never committed.
+*.txt
+*.log

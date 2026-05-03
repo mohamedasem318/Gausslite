@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media.Imaging;
 using Hardcodet.Wpf.TaskbarNotification;
 using Gausslite.App.Diagnostics;
@@ -60,6 +61,10 @@ internal sealed class TrayIconHost : IDisposable
         _taskbarIcon = new TaskbarIcon
         {
             ToolTipText = "Gausslite",
+            // Left-click on the tray icon toggles blur on/off.  Same code path as the
+            // tray menu's "Enable blur" entry and the global hotkey, so override balloons
+            // and state machine behave identically across all three entry points.
+            LeftClickCommand = new ToggleBlurCommand(_orchestrator),
         };
         _notifier?.Attach(_taskbarIcon);
 
@@ -172,5 +177,15 @@ internal sealed class TrayIconHost : IDisposable
         _orchestrator.BlurStateChanged -= OnBlurStateChanged;
         _taskbarIcon?.Dispose();
         _taskbarIcon = null;
+    }
+
+    // Bridges TaskbarIcon.LeftClickCommand → ITrayOrchestrator.ToggleBlur. Always enabled.
+    private sealed class ToggleBlurCommand : ICommand
+    {
+        private readonly ITrayOrchestrator _orchestrator;
+        public ToggleBlurCommand(ITrayOrchestrator orchestrator) => _orchestrator = orchestrator;
+        public bool CanExecute(object? parameter) => true;
+        public void Execute(object? parameter) => _orchestrator.ToggleBlur();
+        public event EventHandler? CanExecuteChanged { add { } remove { } }
     }
 }

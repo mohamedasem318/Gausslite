@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Cold-start placeholder color softened from dark slate (RGB 32,44,51) to light
+  neutral gray (RGB 220,222,220).  The placeholder is still fully opaque (privacy
+  contract preserved); the new color approximates the average tone of a heavily-blurred
+  bright UI (WhatsApp's mostly-white background dominates), so the brief
+  ShowPlaceholder→first-blurred-frame transition during cold start reads as "blur
+  fading in" rather than a jarring dark flash before blur.
+
+### Fixed
+- Auto-blur cold-start now nudges the tracked window to repaint on share-start, so the
+  first blurred frame arrives quickly even when WhatsApp was idle (cursor not over it,
+  no animations) at the moment the share started.  Without this, the user would see
+  the privacy placeholder until WhatsApp painted on its own (which can be seconds for
+  an idle window).  Same `InvalidateRect`-via-`IWindowTracker.RequestRepaintOfTrackedWindow()`
+  pattern v0.2.0 introduced for snap-resize bounds changes.
+- Privacy bug exposed by auto-blur: during a screen share, the v0.2.0 bounds-based
+  occlusion-clipping logic incorrectly reported WhatsApp as fully covered when sharing
+  apps (Zoom in particular) dropped many small floating overlays on top — the Z-order
+  walk subtracted each overlay's full bounds even though those overlays were small or
+  semi-transparent and WhatsApp pixels were leaking around / through them into the
+  shared stream.  The orchestrator now overrides the occlusion logic during an active
+  screen share: blur covers the full WhatsApp window regardless of what's stacked on
+  top.  Worst case is some over-blur where Zoom's overlays really do cover WhatsApp,
+  but viewers see Zoom's overlay there anyway, so the over-blur is invisible to them.
+  v0.2.0's normal occlusion-clipping behavior is preserved when no share is active.
+
+### Added
+- Auto-blur when you start screen sharing. Gausslite now watches for active share-control
+  windows from Zoom, Microsoft Teams, and any browser-based share (Google Meet, web Zoom,
+  web Teams, web Discord, anything using `getDisplayMedia`). When a share starts, blur
+  turns on within ~2 seconds; when the share ends, blur returns to whatever state it was
+  in before. Polling cadence is 1 Hz on the UI thread.
+- Friendly tray balloon when you manually disable blur during an active share: "Blur is
+  off for this share — we'll turn it back on automatically the next time you share your
+  screen." Fires once per share so it doesn't nag.
+- Manual override during a share now sticks for the rest of THAT share. Disable blur
+  mid-share → it stays off until the share ends and the next one begins. Re-enabling
+  during a share also counts as taking manual control — auto-restore at share-end won't
+  undo what you set.
+- Left-click on the system tray icon now toggles blur on/off. Same behavior as the tray
+  menu's "Enable blur" entry and the global hotkey (Ctrl+Shift+B).
+- `tools/ShareProbe` and `tools/DiscordProbe` recon utilities: dump every visible window
+  (and child windows for the Discord probe) so we can capture share-control window
+  signatures from real share sessions. Used to derive the active set of detection
+  signatures; not part of the shipped app.
+
+### Known limitation
+- **Discord desktop** screen sharing is NOT auto-detected. Discord renders its share
+  controls as web content inside its Electron window — invisible to GDI window
+  enumeration at any depth. Workarounds: use the global hotkey (Ctrl+Shift+B), the tray
+  left-click toggle, or share via Discord-in-browser (which IS detected via the generic
+  Chrome/Edge signature). Tracked for a v0.3.x follow-up that does UIA tree-walking on
+  Discord's main window.
+
 ## [0.2.0] - 2026-05-03
 
 ### Known limitation
