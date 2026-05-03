@@ -30,4 +30,15 @@ public interface IWindowTracker
     void SetOverlayWindowHandle(IntPtr hwnd);
     void Start();
     void Stop();
+
+    /// <summary>
+    /// Asks the OS to invalidate the tracked window's client area, which causes the
+    /// window's owning process to repaint and — for WGC-captured windows — produces a
+    /// fresh capture frame at the current size.  Used by the orchestrator after a
+    /// bounds change to nudge the captured app into emitting a frame even when its
+    /// content is otherwise static (the alternative is the user has to hover the
+    /// cursor over the window to provoke a repaint).  No-op if the tracked window is
+    /// not currently present.
+    /// </summary>
+    void RequestRepaintOfTrackedWindow();
 }

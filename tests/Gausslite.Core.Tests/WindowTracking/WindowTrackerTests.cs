@@ -437,5 +437,28 @@ public sealed class WindowTrackerTests : IDisposable
         Assert.False(_tracker.IsTracking);
     }
 
+    [Fact]
+    public void RequestRepaintOfTrackedWindow_WhenWindowFound_CallsInvalidateClientArea()
+    {
+        var hwnd = new IntPtr(123);
+        _profile.FindWindowHandle().Returns(hwnd);
+        _tracker = CreateTracker();
+
+        _tracker.RequestRepaintOfTrackedWindow();
+
+        _win32.Received(1).InvalidateClientArea(hwnd);
+    }
+
+    [Fact]
+    public void RequestRepaintOfTrackedWindow_WhenWindowNotFound_IsNoOp()
+    {
+        _profile.FindWindowHandle().Returns(IntPtr.Zero);
+        _tracker = CreateTracker();
+
+        _tracker.RequestRepaintOfTrackedWindow();
+
+        _win32.DidNotReceive().InvalidateClientArea(Arg.Any<IntPtr>());
+    }
+
     public void Dispose() => _tracker?.Dispose();
 }

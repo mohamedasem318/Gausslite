@@ -45,6 +45,16 @@ public sealed class WindowTracker : IWindowTracker, IDisposable
     public void SetOverlayWindowHandle(IntPtr hwnd) =>
         _overlayWindowHandle = hwnd;
 
+    public void RequestRepaintOfTrackedWindow()
+    {
+        // Resolve the tracked HWND fresh — it can change across capture sessions if the
+        // user closes and re-opens the app.  FindWindowHandle is what the poll loop calls
+        // every 33 ms, so a single extra call is negligible overhead.
+        var hwnd = _profile.FindWindowHandle();
+        if (hwnd == IntPtr.Zero) return;
+        _win32.InvalidateClientArea(hwnd);
+    }
+
     public void Start()
     {
         if (IsTracking) return;

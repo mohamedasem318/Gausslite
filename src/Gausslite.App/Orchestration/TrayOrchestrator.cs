@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Threading;
 using Gausslite.App.Diagnostics;
 using Gausslite.App.Hotkey;
+using Gausslite.App.Tray;
 using Gausslite.Core.AppProfiles;
 using Gausslite.Core.Blur;
 using Gausslite.Core.Capture;
@@ -23,6 +24,7 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
 {
     internal delegate void UiThreadDispatch(string source, Action action, DispatcherPriority priority = DispatcherPriority.Normal);
     internal delegate void BackgroundDispatch(string source, Action action);
+    internal delegate IDisposable DelayedUiDispatch(TimeSpan delay, Action action);
 
     private readonly IWindowTracker _windowTracker;
     private readonly ICaptureEngine _captureEngine;
@@ -32,9 +34,21 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
     private readonly ICaptureItemFactory _captureItemFactory;
     private readonly IAppProfile _profile;
     private readonly IRegionDetector _regionDetector;
+    private ITrayNotifier? _trayNotifier;
     private readonly UiThreadDispatch _dispatchToUiThread;
     private readonly BackgroundDispatch _dispatchToBackground;
+    private readonly DelayedUiDispatch _scheduleDelayedOnUi;
     private readonly BlurActivationStateMachine _activation = new();
+
+    // Delay before the post-bounds-change retry runs.  WhatsApp's responsive layout
+    // typically settles within ~250-300 ms after a resize/maximize; 400 ms is a safe
+    // margin that still feels responsive.  Each new BoundsChanged restarts the timer
+    // (debounce), so a continuous drag fires the retry once at drag end.
+    private static readonly TimeSpan DelayedDetectionRetry = TimeSpan.FromMilliseconds(400);
+
+    // The pending delayed retry, if any.  Disposed (cancelled) when a new BoundsChanged
+    // arrives so a flurry of events during a drag results in a single retry at the end.
+    private IDisposable? _pendingDelayedDetection;
 
     private bool _captureStarted;
     private bool _setupReady;
@@ -48,13 +62,28 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
     private int _frameCount;
     private int _frameExceptionCount;
     private int _noOutputLogged;     // 0 = not yet logged, 1 = logged
-    private int _detectionDone;      // 0 = not yet run, 1 = run for this capture session
 
-    // Stores the most recent detection result.
+    // Detection runs on the first frame of each capture session and then every
+    // DetectionCadenceFrames frames thereafter (~1 s at 30 fps).  A one-shot trigger
+    // (the previous _detectionDone gating) misses internal layout shifts inside
+    // WhatsApp — dragging the chat-list/conversation divider produces no
+    // BoundsChanged event, so the clip would freeze at the old divider forever.
+    // Periodic re-detection catches these within ~1 s.
+    private const int DetectionCadenceFrames = 30;
+
+    // Stores the most recent detection result and the frame dimensions it was derived from.
     // Written and read on the UI thread only — plain assignment is safe.
-    // Null means detection has never run in the current session.
+    // Null / zero means detection has never run (or was cleared) in the current session.
     private RegionDetectionResult? _lastDetectionResult;
+    private int _lastContentWidth;
+    private int _lastContentHeight;
     internal RegionDetectionResult? LastDetectionResult => _lastDetectionResult;
+
+    // Balloon-notification state — UI-thread only.
+    private bool _hasEverDetected;
+    private bool _detectionWasSucceeding;
+    private DateTime? _lastFailureBalloonAt;
+    private bool _scopeFallbackBalloonShown;
 
     public event EventHandler<bool>? BlurStateChanged;
 
@@ -82,9 +111,14 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
             profile,
             regionDetector,
             DispatchToWpfUiThread,
-            DispatchToThreadPool)
+            DispatchToThreadPool,
+            ScheduleDelayedOnWpfUiThread)
     {
     }
+
+    // Wire the balloon notifier after construction. Called by App.xaml.cs once the
+    // TrayNotifier is ready (before TrayIconHost.Initialize attaches the TaskbarIcon).
+    internal void SetTrayNotifier(ITrayNotifier? notifier) => _trayNotifier = notifier;
 
     internal TrayOrchestrator(
         IWindowTracker windowTracker,
@@ -96,7 +130,8 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
         IAppProfile profile,
         IRegionDetector regionDetector,
         UiThreadDispatch dispatchToUiThread,
-        BackgroundDispatch? dispatchToBackground = null)
+        BackgroundDispatch? dispatchToBackground = null,
+        DelayedUiDispatch? scheduleDelayedOnUi = null)
     {
         _windowTracker = windowTracker;
         _captureEngine = captureEngine;
@@ -108,6 +143,7 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
         _regionDetector = regionDetector;
         _dispatchToUiThread = dispatchToUiThread;
         _dispatchToBackground = dispatchToBackground ?? DispatchToThreadPool;
+        _scheduleDelayedOnUi = scheduleDelayedOnUi ?? NoopDelayedUiDispatch;
 
         _hotkeyService.HotkeyPressed += OnHotkeyPressed;
     }
@@ -140,6 +176,19 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
     {
         StartupLog.Info($"SetScope: scope={scope}");
         CurrentScope = scope;
+
+        // One-shot info balloon when the user selects a non-Both scope before we've ever
+        // detected chat regions. Tells the user the selection will apply once detection succeeds.
+        if (scope != BlurRegionScope.Both && !_hasEverDetected && !_scopeFallbackBalloonShown)
+        {
+            _trayNotifier?.ShowBalloon(
+                "Gausslite is still finding your chats",
+                "Your scope choice will kick in once we spot the chat list. Whole window stays blurred until then.",
+                NotificationIcon.Info);
+            _scopeFallbackBalloonShown = true;
+        }
+
+        RecomputeAndApplyClip("SetScope");
     }
 
     public void EnableBlur()
@@ -326,9 +375,17 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
             _captureEngine.Stop();
         }
 
-        // Reset detection flag so the first frame of the next capture session triggers detection.
-        Interlocked.Exchange(ref _detectionDone, 0);
+        // Reset detection state and frame counter so the first frame of the next capture
+        // session triggers detection (count == 1 satisfies the cadence rule below).
+        Interlocked.Exchange(ref _frameCount, 0);
+        Interlocked.Exchange(ref _noOutputLogged, 0);
         _lastDetectionResult = null;
+        _lastContentWidth    = 0;
+        _lastContentHeight   = 0;
+
+        // Cancel any pending delayed RunDetection — the new session will start its own.
+        _pendingDelayedDetection?.Dispose();
+        _pendingDelayedDetection = null;
 
         HideOverlay(source);
         _windowTracker.SetOverlayWindowHandle(IntPtr.Zero);
@@ -372,9 +429,8 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
             StartupLog.Info($"{source}: overlay move applied to bounds {bounds}{elapsedText}; expected privacy-critical event-to-move under 20 ms");
         }
 
-        // Always (re-)apply the visible-region clip after showing or while already visible,
-        // so region changes while the overlay is active are reflected immediately.
-        ApplyRegionClip(source, bounds);
+        // Always (re-)apply the scope-aware clip after showing or while already visible.
+        RecomputeAndApplyClip(source);
     }
 
     private void OnBoundsChanged(object? sender, Rect bounds)
@@ -389,6 +445,30 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
             // Capture the previous bounds before overwriting so we can compare sizes.
             var previousBounds = _lastKnownBounds;
             _lastKnownBounds = bounds;
+
+            if (OverlaySizeChanged(bounds, previousBounds))
+            {
+                // On a size change (maximize, restore, manual resize): immediately discard
+                // any detection result that was computed from the previous frame dimensions.
+                // Stale results would map old capture-pixel rects through the wrong
+                // content-size ratio, placing the scope clip in the wrong position on the
+                // resized overlay.  Clearing here forces RecomputeAndApplyClip (called
+                // below via ApplyVisibilityForCurrentWindow) into the privacy-safe
+                // full-coverage fallback while the fresh-frame detection is in flight.
+                //
+                // The cadence-driven detection in OnFrameArrived (every
+                // DetectionCadenceFrames frames) is the reliable backstop: even without an
+                // explicit re-arm, the next cadence tick re-runs detection on a
+                // post-resize frame.  RunDetection("OnBoundsChanged") below is the
+                // best-effort fast path that converges sooner when the cache already holds
+                // a matching-size frame — Fix 1 (IsReadbackFrameConsistentWithBounds)
+                // ensures stale frames don't get cached.
+                _lastDetectionResult = null;
+                _lastContentWidth    = 0;
+                _lastContentHeight   = 0;
+                StartupLog.Info($"OnBoundsChanged: size changed — cleared stale detection state");
+            }
+
             if (_setupReady)
             {
                 if (_activation.State == BlurActivationState.Active && OverlaySizeGrew(bounds, previousBounds))
@@ -420,9 +500,42 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
 
             ApplyVisibilityForCurrentWindow("OnBoundsChanged");
 
-            // Re-run detection after the overlay has been moved so rects reflect the new layout.
+            // Best-effort fast path: re-run detection with whatever frame is cached now.
+            // If the frame pool has already produced a post-resize frame this wins cleanly.
+            // If not, the re-armed OnFrameArrived detection (above) is the reliable backstop.
             RunDetection("OnBoundsChanged");
+
+            // Even when the fast-path RunDetection succeeds immediately, the first
+            // post-resize WGC frame typically captures WhatsApp mid-layout-transition
+            // (chat list at an intermediate width).  Schedule a debounced retry ~400 ms
+            // later so detection re-runs on whatever frame is in the input cache once
+            // WhatsApp's responsive layout has settled.
+            ScheduleDelayedDetectionRetry("OnBoundsChanged");
+
+            // Nudge the tracked window into repainting.  Some bounds changes (e.g. snap
+            // resizes where WhatsApp's WGC contentSize stays at the pre-snap value)
+            // produce no fresh WGC frame on their own — without this the user has to
+            // hover the cursor over the window to provoke a paint.  The repaint usually
+            // lands well within the 400 ms delayed-retry window above; the retry then
+            // detects on the freshly-captured frame.
+            _windowTracker.RequestRepaintOfTrackedWindow();
         });
+    }
+
+    // Cancels any pending delayed retry and schedules a new one.  Each new BoundsChanged
+    // restarts the timer (debounce), so a flurry of events during a drag fires the
+    // retry exactly once at drag end.
+    private void ScheduleDelayedDetectionRetry(string trigger)
+    {
+        _pendingDelayedDetection?.Dispose();
+        _pendingDelayedDetection = _scheduleDelayedOnUi(
+            DelayedDetectionRetry,
+            () =>
+            {
+                _pendingDelayedDetection = null;
+                if (!IsBlurEnabled) return;
+                RunDetection($"DelayedAfter{trigger}");
+            });
     }
 
     private void OnMinimizedChanged(object? sender, bool isMinimized)
@@ -535,10 +648,40 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
     // True when the tracker reports a non-empty visible region (i.e. window is not fully occluded).
     private bool HasVisibleRegion() => (_windowTracker.VisibleRegion?.Count ?? 0) > 0;
 
-    // Applies a WPF clip to the overlay based on the current visible region.
-    // Called after MoveToBounds so the clip is in overlay-local DIP coordinates.
-    private void ApplyRegionClip(string source, Rect overlayBounds)
+    // Computes the scope-aware clip and applies it to the overlay.
+    // Reads: _lastKnownBounds, _windowTracker.VisibleRegion, _lastDetectionResult,
+    //        _lastContentWidth/Height, CurrentScope.
+    // Writes: overlay clip via SetClip. Also updates balloon notification state.
+    // Must be called on the UI thread.
+    private void RecomputeAndApplyClip(string source)
     {
+        var bounds = _lastKnownBounds;
+        if (bounds is null)
+            return;
+
+        // Self-validate against the cached content size.  Multiple paths update
+        // _lastKnownBounds (OnBoundsChanged AND OnVisibleRegionChanged via
+        // CacheCurrentOrDefaultBounds); when OnVisibleRegionChanged lands first on a
+        // resize, OnBoundsChanged sees previousBounds == newBounds and never fires its
+        // size-change clear.  This invariant catches that race centrally — wherever
+        // bounds are updated, the next clip computation rejects an inconsistent cache.
+        // Applies the same envelope as IsReadbackFrameConsistentWithBounds.
+        if (_lastContentWidth > 0 && _lastContentHeight > 0)
+        {
+            double cachedScaleX = bounds.Value.Width  / _lastContentWidth;
+            double cachedScaleY = bounds.Value.Height / _lastContentHeight;
+            if (!IsScaleRatioConsistent(cachedScaleX, cachedScaleY))
+            {
+                StartupLog.Info(
+                    $"{source}: clip-compose detected stale content cache " +
+                    $"(bounds={bounds.Value} content={_lastContentWidth}x{_lastContentHeight} " +
+                    $"scale={cachedScaleX:F3}x{cachedScaleY:F3}) — clearing detection state");
+                _lastDetectionResult = null;
+                _lastContentWidth    = 0;
+                _lastContentHeight   = 0;
+            }
+        }
+
         var region = _windowTracker.VisibleRegion;
         if (region is null || region.Count == 0)
         {
@@ -546,27 +689,123 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
             return;
         }
 
-        // Full-bounds case → no clip needed.
-        if (region.Count == 1 && region[0] == overlayBounds)
+        bool detectionSucceeded = _lastDetectionResult.HasValue && _lastDetectionResult.Value.Succeeded;
+        UpdateBalloonState(detectionSucceeded);
+
+        // Convert visible-region screen-DIP rects to overlay-local coordinates (origin at overlay top-left).
+        var localRects = new List<Rect>(region.Count);
+        foreach (var r in region)
+            localRects.Add(new Rect(r.X - bounds.Value.X, r.Y - bounds.Value.Y, r.Width, r.Height));
+
+        // Determine scope rect in overlay-local DIPs.
+        // Null means no scope filtering (Both, or detection unavailable).
+        Rect? scopeRect = null;
+        Rect? captureRectInput = null;
+        if (CurrentScope != BlurRegionScope.Both
+            && detectionSucceeded
+            && _lastContentWidth  > 0
+            && _lastContentHeight > 0)
         {
-            _overlayWindow.SetClip(null);
-            StartupLog.Info($"{source}: full visibility — clip cleared");
+            captureRectInput = CurrentScope == BlurRegionScope.ChatList
+                ? _lastDetectionResult!.Value.ChatListRect
+                : _lastDetectionResult!.Value.ConversationRect;
+
+            scopeRect = CaptureToOverlayConverter.Convert(
+                captureRectInput.Value,
+                _lastContentWidth,
+                _lastContentHeight,
+                bounds.Value.Width,
+                bounds.Value.Height);
+        }
+
+        // Diagnostic line: bounds, content size, scale ratios, and the input/output rect
+        // pair the converter just operated on.  Pinned out as the single point that lets
+        // smoke tests for Layouts B (left-edge resize) and C (maximize) verify the new
+        // bounds and the cached content size are paired with the correct ratio.
+        double diagScaleX = (_lastContentWidth  > 0) ? bounds.Value.Width  / _lastContentWidth  : 0;
+        double diagScaleY = (_lastContentHeight > 0) ? bounds.Value.Height / _lastContentHeight : 0;
+        StartupLog.Info(
+            $"{source}: clip-compose bounds={bounds.Value} content={_lastContentWidth}x{_lastContentHeight} " +
+            $"scale={diagScaleX:F3}x{diagScaleY:F3} captureRect={(captureRectInput?.ToString() ?? "(none)")} " +
+            $"scopeRect={(scopeRect?.ToString() ?? "(none)")}");
+
+        if (scopeRect is null)
+        {
+            // No scope filtering: optimise for the common full-coverage case.
+            if (localRects.Count == 1
+                && localRects[0].X == 0 && localRects[0].Y == 0
+                && localRects[0].Width  == bounds.Value.Width
+                && localRects[0].Height == bounds.Value.Height)
+            {
+                _overlayWindow.SetClip(null);
+                StartupLog.Info($"{source}: full visibility, no scope — clip cleared");
+                return;
+            }
+
+            _overlayWindow.SetClip(localRects);
+            StartupLog.Info($"{source}: visibility clip ({localRects.Count} rect(s)), scope=Both or detection unavailable");
             return;
         }
 
-        // Convert screen-DIP rects to overlay-local coordinates (origin = overlay top-left).
-        var localRects = new List<Rect>(region.Count);
-        foreach (var r in region)
-            localRects.Add(new Rect(r.X - overlayBounds.X, r.Y - overlayBounds.Y, r.Width, r.Height));
+        // Intersect each visible rect with the scope rect.
+        // Filter degenerate zero-area intersections (WPF Rect.Intersect can return a
+        // zero-width/height rect when edges exactly touch — that is not a visible region).
+        var intersected = new List<Rect>();
+        foreach (var r in localRects)
+        {
+            var inter = Rect.Intersect(r, scopeRect.Value);
+            if (!inter.IsEmpty && inter.Width > 0 && inter.Height > 0)
+                intersected.Add(inter);
+        }
 
-        _overlayWindow.SetClip(localRects);
-        StartupLog.Info($"{source}: partial visibility — clip set to {localRects.Count} local rect(s)");
+        if (intersected.Count == 0)
+            StartupLog.Info($"{source}: scope rect fully outside visible region — clip empty (full-overlay privacy fallback)");
+        else
+            StartupLog.Info($"{source}: scope-filtered clip ({intersected.Count} rect(s)), scope={CurrentScope}");
+
+        _overlayWindow.SetClip(intersected);
+    }
+
+    // Tracks detection success/failure transitions and fires balloon notifications.
+    private void UpdateBalloonState(bool currentSucceeded)
+    {
+        if (currentSucceeded && !_hasEverDetected)
+        {
+            _hasEverDetected = true;
+            _detectionWasSucceeding = true;
+            return;
+        }
+
+        if (!currentSucceeded && _detectionWasSucceeding && _hasEverDetected)
+        {
+            _trayNotifier?.ShowBalloon(
+                "Gausslite couldn't find your chats",
+                "Blurring the whole WhatsApp window to keep you covered. This usually fixes itself — try resizing WhatsApp or scrolling the chat list.",
+                NotificationIcon.Warning);
+            _detectionWasSucceeding = false;
+            _lastFailureBalloonAt = DateTime.UtcNow;
+            return;
+        }
+
+        if (currentSucceeded && !_detectionWasSucceeding)
+        {
+            _hasEverDetected = true;
+            if (_lastFailureBalloonAt is null ||
+                (DateTime.UtcNow - _lastFailureBalloonAt.Value).TotalSeconds > 30)
+            {
+                _trayNotifier?.ShowBalloon(
+                    "Gausslite is back on track",
+                    "Scope-aware blur is working again.",
+                    NotificationIcon.Info);
+            }
+            _detectionWasSucceeding = true;
+        }
     }
 
     // Reads the latest GPU frame back to the CPU and runs the region detector.
     // Must be called on the UI thread — both trigger points (OnFrameArrived dispatch and
-    // OnBoundsChanged body) ensure this.  _lastDetectionResult is written here and read
-    // only on the UI thread, so plain assignment is safe.
+    // OnBoundsChanged body) ensure this.  _lastDetectionResult and _lastContent* are written
+    // here and read only on the UI thread, so plain assignment is safe.
     private void RunDetection(string source)
     {
         if (!_blurPipeline.TryReadLatestFrameAsBgra(out var pixels, out var w, out var h, out var s))
@@ -574,6 +813,27 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
             StartupLog.Info($"{source}: detection skipped — no frame available for readback");
             return;
         }
+
+        // Reject readback frames whose dimensions don't match the current bounds.
+        // After a resize, the BlurPipeline cache still holds a pre-resize frame for one
+        // tick before OnFrameArrived refills it. Detecting on that stale frame writes
+        // chatList/conversation rects that, once paired with the new bounds in
+        // RecomputeAndApplyClip, get stretched through the wrong scale ratio (e.g.
+        // 1.596 instead of 1.000 on maximize), placing the clip far from the divider.
+        // Skip and let the privacy-safe full-coverage fallback hold; the next frame from
+        // OnFrameArrived will produce a matching-size readback.
+        if (!IsReadbackFrameConsistentWithBounds(w, h, out var diagScaleX, out var diagScaleY))
+        {
+            StartupLog.Info(
+                $"{source}: detection skipped — readback {w}x{h} inconsistent with bounds {_lastKnownBounds} " +
+                $"(scaleX={diagScaleX:F3}, scaleY={diagScaleY:F3}; expected ≈1.000 or ≈1.012)");
+            return;
+        }
+
+        // Cache the content size alongside the detection result; both are consumed by
+        // RecomputeAndApplyClip for coordinate-space conversion.
+        _lastContentWidth  = w;
+        _lastContentHeight = h;
 
         var result = _regionDetector.Detect(pixels, w, h, s);
         _lastDetectionResult = result;
@@ -584,6 +844,43 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
                 $"chatList={result.ChatListRect}, conversation={result.ConversationRect}");
         else
             StartupLog.Info($"{source}: detection failed — {result.FailureReason}");
+
+        // Recompute clip using the fresh detection result.
+        RecomputeAndApplyClip(source);
+    }
+
+    // Validates that the readback frame's dimensions are consistent with the current
+    // _lastKnownBounds. WhatsApp's bounds-to-content ratio sits in a tight envelope:
+    //   - Windowed: ≈ 1.012 horizontal, 1.009 vertical (the 14 × 7 px DWM gap).
+    //   - Maximized: ≈ 1.000 (NormalizeWindowRect strips the gap).
+    // Anything outside both envelopes (with ±0.03 tolerance) means the readback is from
+    // BEFORE the latest size change. Returns false in that case; callers must NOT update
+    // cached detection state.  When _lastKnownBounds is null (early startup), accepts the
+    // readback unconditionally — there is no current bounds to disagree with.
+    internal bool IsReadbackFrameConsistentWithBounds(int frameWidth, int frameHeight, out double scaleX, out double scaleY)
+    {
+        scaleX = 0; scaleY = 0;
+        if (!_lastKnownBounds.HasValue) return true;
+        if (frameWidth <= 0 || frameHeight <= 0) return false;
+
+        var bounds = _lastKnownBounds.Value;
+        if (bounds.Width <= 0 || bounds.Height <= 0) return false;
+
+        scaleX = bounds.Width  / frameWidth;
+        scaleY = bounds.Height / frameHeight;
+        return IsScaleRatioConsistent(scaleX, scaleY);
+    }
+
+    // Checks a (scaleX, scaleY) pair against WhatsApp's expected bounds-to-content ratio
+    // envelope: maximized ≈ 1.000 or windowed ≈ 1.012/1.009 (the 14 × 7 px DWM gap),
+    // ±0.03 tolerance on each axis.  Used by both readback validation and by
+    // RecomputeAndApplyClip's self-validation against the cached content size.
+    private static bool IsScaleRatioConsistent(double scaleX, double scaleY)
+    {
+        const double Tolerance = 0.03;
+        bool xOk = Math.Abs(scaleX - 1.000) < Tolerance || Math.Abs(scaleX - 1.012) < Tolerance;
+        bool yOk = Math.Abs(scaleY - 1.000) < Tolerance || Math.Abs(scaleY - 1.009) < Tolerance;
+        return xOk && yOk;
     }
 
     private void TransitionToIdle(string source)
@@ -653,6 +950,47 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
             priority);
     }
 
+    // Real DispatcherTimer-based delayed dispatch used in production.  Created with
+    // DispatcherPriority.Normal so it doesn't fight overlay move/clip operations
+    // dispatched at Send priority.  Disposing the returned IDisposable stops the timer
+    // before it fires (used to debounce rapid BoundsChanged events).
+    private static IDisposable ScheduleDelayedOnWpfUiThread(TimeSpan delay, Action action)
+    {
+        var dispatcher = Application.Current?.Dispatcher;
+        if (dispatcher is null || dispatcher.HasShutdownStarted || dispatcher.HasShutdownFinished)
+            return NoopDisposable.Instance;
+
+        var timer = new DispatcherTimer(DispatcherPriority.Normal, dispatcher) { Interval = delay };
+        EventHandler? handler = null;
+        handler = (_, _) =>
+        {
+            timer.Stop();
+            timer.Tick -= handler;
+            try { action(); }
+            catch (Exception ex) { StartupLog.Warn("ScheduleDelayedOnWpfUiThread: delayed action threw", ex); }
+        };
+        timer.Tick += handler;
+        timer.Start();
+        return new TimerStopDisposable(timer);
+    }
+
+    private sealed class TimerStopDisposable : IDisposable
+    {
+        private readonly DispatcherTimer _timer;
+        public TimerStopDisposable(DispatcherTimer timer) => _timer = timer;
+        public void Dispose() => _timer.Stop();
+    }
+
+    // Default for tests: never fires the delayed action.  Tests that exercise the
+    // delayed-retry path inject a capturing dispatch instead.
+    private static IDisposable NoopDelayedUiDispatch(TimeSpan _, Action __) => NoopDisposable.Instance;
+
+    private sealed class NoopDisposable : IDisposable
+    {
+        public static readonly NoopDisposable Instance = new();
+        public void Dispose() { }
+    }
+
     private static void DispatchToThreadPool(string source, Action action)
     {
         _ = Task.Run(() =>
@@ -696,12 +1034,14 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
 
             _overlayWindow.PresentFrame(blurred);
 
-            // Run detection once on the first successfully blurred frame.
-            // BlurFrame has updated _cachedInputFrame, so TryReadLatestFrameAsBgra can succeed.
+            // Cadence-driven detection: first frame of the session, then every
+            // DetectionCadenceFrames frames thereafter.  Captures both the post-bounds-change
+            // backstop (the fast path in OnBoundsChanged is best-effort) and internal
+            // WhatsApp layout shifts that emit no BoundsChanged event (e.g. divider drag).
             // Capture _setupGeneration here (background thread) so a TearDownCaptureAndOverlay
             // that executes before this lambda runs does not write stale layout data for the
             // new session.
-            if (Interlocked.Exchange(ref _detectionDone, 1) == 0)
+            if (count == 1 || count % DetectionCadenceFrames == 0)
             {
                 var gen = _setupGeneration;
                 _dispatchToUiThread("OnFrameArrived.Detection",
@@ -727,6 +1067,16 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
         if (!previousBounds.HasValue) return true; // first bounds received
         return newBounds.Width  > previousBounds.Value.Width  + 1 ||
                newBounds.Height > previousBounds.Value.Height + 1;
+    }
+
+    // Returns true when the overlay DIP size changed in either direction (grow or shrink),
+    // using the same ±1 DIP tolerance as OverlaySizeGrew to filter sub-pixel float noise.
+    // Returns false when previousBounds is null (first-bounds event: nothing stale to clear).
+    private static bool OverlaySizeChanged(Rect newBounds, Rect? previousBounds)
+    {
+        if (!previousBounds.HasValue) return false;
+        return Math.Abs(newBounds.Width  - previousBounds.Value.Width)  > 1 ||
+               Math.Abs(newBounds.Height - previousBounds.Value.Height) > 1;
     }
 
     private void OnHotkeyPressed(object? sender, EventArgs e) => ToggleBlur();

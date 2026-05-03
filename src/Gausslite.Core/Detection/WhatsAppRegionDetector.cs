@@ -42,25 +42,39 @@ public sealed class WhatsAppRegionDetector : IRegionDetector
         int rangeMinPx = (int)(PlausibleRangeMin * frameWidth);
         int rangeMaxPx = (int)(PlausibleRangeMax * frameWidth);
 
-        // Phase 1: best consistent-across-full-height edge within the plausible range.
+        // Phase 1: leftmost strong vertical edge within the plausible range.
         //
-        // Searching only within the plausible range keeps the narrow navigation-icons
-        // strip (< 10 % from the left edge in modern WhatsApp) from outscoring the
-        // real panel divider. Scoring by row-count rather than minimum delta means a
-        // tall in-chat image — whose border is strong at only a fraction of heights —
-        // cannot beat the divider, which is present at every row.
-        int bestX     = -1;
-        int bestCount = -1;
+        // We stop at the first column whose consistent-row count reaches minConsistent
+        // rather than scanning for the global maximum. In WhatsApp's layout the real
+        // chat-list / conversation divider is always the leftmost strong edge inside
+        // the plausible window: navigation-rail + chat-list content appear first, then
+        // the divider, then the conversation pane. Secondary structural columns that
+        // appear further right — notably the message-bubble max-width boundary
+        // (~750 px into a wide conversation pane on maximized layouts) — can have a
+        // higher consistent-row count than the real divider, causing the old
+        // global-maximum rule to pick the wrong column. Taking the leftmost qualifying
+        // column fixes this without touching any other part of the algorithm.
+        //
+        // RTL layouts are unaffected: the real divider is still the leftmost strong
+        // edge in the plausible band; DetermineRailSide assigns panels afterward.
+        //
+        // Threshold: minConsistent (70 % of sampled rows). The real divider spans the
+        // full frame height and scores close to 100 %; 70 % gives margin for windowed
+        // messages, media images, and other per-row interruptions.
+        int bestX = -1;
 
         for (int x = Math.Max(EdgeIgnorePixels, rangeMinPx);
                  x <= Math.Min(rangeMaxPx, frameWidth - EdgeIgnorePixels - 1);
                  x++)
         {
-            int count = CountConsistentRows(bgraPixels, frameStride, x, frameHeight);
-            if (count > bestCount) { bestCount = count; bestX = x; }
+            if (CountConsistentRows(bgraPixels, frameStride, x, frameHeight) >= minConsistent)
+            {
+                bestX = x;
+                break;
+            }
         }
 
-        if (bestX < 0 || bestCount < minConsistent)
+        if (bestX < 0)
         {
             // Phase 2: check outside the plausible range to give an informative reason.
             for (int x = EdgeIgnorePixels; x < frameWidth - EdgeIgnorePixels; x++)

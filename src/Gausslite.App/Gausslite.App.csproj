@@ -34,6 +34,10 @@
     <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
       <_Parameter1>Gausslite.App.Tests</_Parameter1>
     </AssemblyAttribute>
+    <!-- Required for NSubstitute to proxy internal interfaces (e.g. ITrayNotifier) -->
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>DynamicProxyGenAssembly2</_Parameter1>
+    </AssemblyAttribute>
   </ItemGroup>
 
 </Project>
