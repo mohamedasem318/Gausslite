@@ -5,10 +5,12 @@
 
 ## Current milestone
 
-**v0.2.0 — "The right regions"**
+**v0.3.0 — "Knows when to blur"** (next; not yet started)
 
-v0.1.0 and v0.1.1 are shipped. See PLAN.md for the v0.2.0 milestone
-definition and CHANGELOG.md for full v0.1.x development history.
+v0.1.0, v0.1.1, and v0.2.0 are shipped. See PLAN.md for the v0.3.0
+milestone definition and CHANGELOG.md for full v0.1.x / v0.2.0
+development history. Issue #35 tracks the v0.2.0 known limitation
+(internal-divider drags during static periods) for a v0.4.0 fix.
 
 ## Last session summary
 
@@ -200,17 +202,16 @@ WGC capture border, TFM bump to 22621)** — see HISTORY.md for full notes.
 
 ## Next up
 
-**v0.2.0 is feature-complete and ready to ship.** Scope-aware clip works through resize/maximize/snap with the documented limitation around internal-divider drags during static periods. Pending:
+**v0.2.0 has shipped** (PR #34 squash-merged to main, branch deleted, tagged `v0.2.0`). Issue #35 tracks the documented known limitation. Roadmap from here:
 
-- Squash-merge `v0.2.0-clip-composition` into `main` and tag `v0.2.0`.
-- v0.3.0 auto-activation: detect WhatsApp launch and enable blur automatically. See PLAN.md for milestone definition.
-- v0.4.0 settings: opt-in armed-state notification, blur-radius slider, and user-toggle for the "wall-time forced-repaint" timer that would close the internal-divider-drag limitation.
-- `RegionDump` annotation fix (separate Codex task, still pending).
-
-**Known limitation carried into v0.2.0 release notes:** internal WhatsApp layout shifts during static periods (no user input, content not changing) may delay scope-clip update by up to a few seconds. Workaround: nudge the cursor over WhatsApp. See "Last session summary" above for the technical cause and the fix that was deferred to v0.4.0.
+- **v0.3.0 — "Knows when to blur".** Auto-activation: detect screen-share clients (Zoom, Teams, Meet, Discord, OBS) and which monitor/window they're capturing. Blur activates within 2 s of share start, deactivates within 2 s of share end. Privacy-first fallback: blur enabled when share-target detection is uncertain. See PLAN.md for full milestone definition.
+- **v0.4.0 — "Polish".** Settings window with persistence; continuous blur-radius slider (replaces the fixed Light/Medium/Heavy presets, or adds a fourth "Custom" option); auto-start with Windows; opt-in armed-state notification toggle; opt-in toggle for the wall-time forced-repaint timer that closes issue #35.
+- **v0.5.0 — "Notifications too".** Toast-notification blur during screen sharing.
+- **v1.0.0 — Indirect Display Driver.** The big architectural shift: blur appears only in the shared stream, real monitor stays untouched.
+- `RegionDump` annotation fix (separate Codex task, still pending; orthogonal to the milestones above).
 
 All pre-existing v0.2.0 work (occlusion clipping, intensity presets, edge-fade fix, region scope
-submenu scaffold) remains working and unchanged.
+submenu, scope-aware clip composition) remains working and unchanged.
 
 ## Blockers
 

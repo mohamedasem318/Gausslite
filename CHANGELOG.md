@@ -7,12 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-03
+
 ### Known limitation
 - Internal WhatsApp layout shifts (e.g. dragging the chat-list/conversation divider
   inside WhatsApp itself) may take a few seconds to update the scope clip if WhatsApp
   is otherwise idle and not delivering capture frames. Workaround: hover the cursor
   over WhatsApp — the resulting paint provokes a fresh capture frame and the clip
-  updates within ~1 second. Will be addressed in a future release as an opt-in setting.
+  updates within ~1 second. Tracked in
+  https://github.com/mohamedasem318/Gausslite/issues/35; planned fix is an opt-in
+  wall-time forced-repaint timer in v0.4.0 once the broader settings UI lands.
 
 ### Fixed
 - Scope-aware clip now follows WhatsApp through left-edge resize, maximize/restore,

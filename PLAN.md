@@ -94,16 +94,18 @@ covered by manual smoke tests.
 - No functional changes
 - Updated tray icon to match new branding
 
-### v0.2.0 — "The right regions"
-- RegionDetector identifies chat list & conversation rects via UIA
-  (UI Automation), with a computer-vision fallback if UIA fails
+### v0.2.0 — "The right regions" ✅ shipped
+- RegionDetector identifies chat list & conversation rects (CV-only;
+  UIA path was scoped out after recon confirmed WhatsApp Desktop is a
+  WebView2 shell whose chat content is invisible to UIA — see decisions
+  log entry from 2026-05-02)
 - Tray menu options: "Blur chat list", "Blur conversation", "Blur both"
 - Tray menu intensity submenu: "Light", "Medium", "Heavy" presets
   (mapping to fixed blur-radius values). Use case: Light keeps
   chat silhouettes readable for the user while staying unreadable
   for viewers, useful since the overlay is visible to both
-- BlurPipeline accepts a runtime-configurable blur radius (currently
-  hardcoded at 20 DIPs)
+- BlurPipeline accepts a runtime-configurable blur radius (was
+  hardcoded at 20 DIPs in v0.1.x)
 - Pixel-region occlusion clipping: when WhatsApp is partially behind
   another window, blur only the visible portion instead of hiding the
   whole overlay (replaces the v0.1.0 center-point hide-all behavior)
@@ -113,7 +115,13 @@ covered by manual smoke tests.
   IAppProfile implementation. Code-quality refactor; no user-visible
   behavior change beyond the cleaner internal seam. If multi-app
   support is added post-v1.0, this is the interface it plugs into
-- Smoke test on 3 different WA Desktop layouts (default, narrow, wide)
+- Smoke test passed on default, snap, and maximized layouts (LTR + RTL)
+- **Known limitation:** internal WhatsApp layout shifts during
+  otherwise-static periods (e.g. dragging the chat-list/conversation
+  divider with no other interaction) may delay scope-clip update by a
+  few seconds. Workaround: hover the cursor over WhatsApp. Tracked in
+  issue #35; planned fix is an opt-in wall-time forced-repaint timer
+  in v0.4.0 once the broader settings UI lands
 
 ### v0.3.0 — "Knows when to blur"
 - ScreenShareDetector identifies which app is sharing: Zoom, Teams,
@@ -143,6 +151,11 @@ covered by manual smoke tests.
   armed-state silence remains the v0.1.0 default behavior; this
   surfaces it for users who want feedback)
 - Settings persistence (currently nothing persists across launches)
+- Opt-in wall-time forced-repaint timer to close issue #35 (the v0.2.0
+  internal-divider-drag-during-static-periods limitation): periodic
+  `IWindowTracker.RequestRepaintOfTrackedWindow()` call while blur is
+  active so internal layout shifts converge without user hover. Off by
+  default — small steady CPU/battery cost is the tradeoff
 - Updater check (manual link to GitHub Releases for v0; auto-update
   is post-v1)
 
