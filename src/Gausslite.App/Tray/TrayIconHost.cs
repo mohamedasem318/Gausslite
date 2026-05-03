@@ -18,6 +18,7 @@ namespace Gausslite.App.Tray;
 internal sealed class TrayIconHost : IDisposable
 {
     private readonly ITrayOrchestrator _orchestrator;
+    private readonly TrayNotifier? _notifier;
     private TaskbarIcon? _taskbarIcon;
     private MenuItem? _toggleItem;
     private MenuItem? _intensityLightItem;
@@ -27,7 +28,11 @@ internal sealed class TrayIconHost : IDisposable
     private MenuItem? _scopeConversationItem;
     private MenuItem? _scopeBothItem;
 
-    public TrayIconHost(ITrayOrchestrator orchestrator) => _orchestrator = orchestrator;
+    public TrayIconHost(ITrayOrchestrator orchestrator, TrayNotifier? notifier = null)
+    {
+        _orchestrator = orchestrator;
+        _notifier = notifier;
+    }
 
     public void Initialize()
     {
@@ -56,6 +61,7 @@ internal sealed class TrayIconHost : IDisposable
         {
             ToolTipText = "Gausslite",
         };
+        _notifier?.Attach(_taskbarIcon);
 
         StartupLog.Info("TrayIconHost.Initialize: assigning IconSource...");
         _taskbarIcon.IconSource = iconImage;

@@ -7,7 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Known limitation
+- Internal WhatsApp layout shifts (e.g. dragging the chat-list/conversation divider
+  inside WhatsApp itself) may take a few seconds to update the scope clip if WhatsApp
+  is otherwise idle and not delivering capture frames. Workaround: hover the cursor
+  over WhatsApp — the resulting paint provokes a fresh capture frame and the clip
+  updates within ~1 second. Will be addressed in a future release as an opt-in setting.
+
+### Fixed
+- Scope-aware clip now follows WhatsApp through left-edge resize, maximize/restore,
+  snap-resize, and external bounds changes without needing the user to hover over
+  WhatsApp afterwards. Five layered fixes: (1) `RunDetection` validates the readback frame's dimensions
+  against the current window bounds and skips when they're inconsistent (rejects stale
+  cached frames during the bounds-change → post-resize-frame race window — these caused
+  the clip to map old rects through a wrong scale ratio, e.g. 1.596 instead of 1.000
+  on maximize); (2) detection runs continuously on a 30-frame cadence (~1 s at 30 fps)
+  instead of as a one-shot per capture session, catching internal WhatsApp layout
+  shifts (e.g. divider drags) that emit no resize event; (3) `RecomputeAndApplyClip`
+  self-validates cached content size against current bounds and auto-clears stale
+  state — covers the race where `OnVisibleRegionChanged` updates bounds before
+  `OnBoundsChanged`'s size-change handler runs; (4) every `BoundsChanged` schedules a
+  debounced ~400 ms delayed re-detection, so the post-responsive-layout steady state
+  gets re-detected even when WhatsApp goes static and stops emitting WGC frames; (5)
+  every `BoundsChanged` invalidates WhatsApp's client area via `InvalidateRect`,
+  forcing it to repaint and produce a fresh WGC frame the delayed-retry can detect on
+  — closes the residual case where WGC's `contentSize` doesn't update in lockstep with
+  the window's bounds (e.g. snap resizes).
+
 ### Added
+- Diagnostic `clip-compose` log line in `RecomputeAndApplyClip` prints bounds, content
+  size, scale ratios, and the input/output rect pair on every clip recomputation —
+  pinned out as the single point that makes coordinate-conversion bugs visible in
+  smoke-test logs.
 - Internal: region detection now runs on the first captured frame and on every WhatsApp
   resize; results are stored but not yet used to drive blur scope or clip behavior.
 - Blur region scope submenu: tray menu "Blur region" with three options — "Chat list",

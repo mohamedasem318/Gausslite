@@ -94,6 +94,9 @@ public sealed class Win32Api : IWin32Api
     int IWin32Api.GetWindowExStyle(IntPtr hwnd) =>
         hwnd == IntPtr.Zero ? 0 : NativeMethods.GetWindowLong(hwnd, NativeMethods.GWL_EXSTYLE);
 
+    bool IWin32Api.InvalidateClientArea(IntPtr hwnd) =>
+        hwnd != IntPtr.Zero && NativeMethods.InvalidateRect(hwnd, IntPtr.Zero, false);
+
     public IntPtr FindWindowHandle(Func<string, string, string, bool> predicate)
     {
         IntPtr result = IntPtr.Zero;
@@ -173,6 +176,10 @@ public sealed class Win32Api : IWin32Api
 
         [DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
         public static extern int GetWindowLong(IntPtr hwnd, int nIndex);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool InvalidateRect(IntPtr hWnd, IntPtr lpRect, [MarshalAs(UnmanagedType.Bool)] bool bErase);
 
         [StructLayout(LayoutKind.Sequential)]
         public struct MONITORINFO

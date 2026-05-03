@@ -32,4 +32,13 @@ public interface IWin32Api
 
     /// <summary>Returns the extended window style (<c>GetWindowLong(hwnd, GWL_EXSTYLE)</c>).</summary>
     int GetWindowExStyle(IntPtr hwnd);
+
+    /// <summary>
+    /// Invalidates the entire client area of <paramref name="hwnd"/>, marking it for
+    /// repaint.  Used to nudge a foreign-process window into emitting a fresh paint —
+    /// which causes WGC to deliver a fresh capture frame at the current size.  No-op
+    /// when <paramref name="hwnd"/> is <see cref="IntPtr.Zero"/>.  Returns true if the
+    /// underlying <c>InvalidateRect</c> call succeeded.
+    /// </summary>
+    bool InvalidateClientArea(IntPtr hwnd);
 }

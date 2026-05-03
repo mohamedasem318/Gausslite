@@ -6,6 +6,72 @@
 
 ## Session history
 
+### 2026-05-03 — v0.2.0 clip composition: forced-repaint nudge + known limitation
+
+**Context.** Smoke-test of the prior round (race-safe self-validation + delayed-retry) showed scope-aware clip mostly converges correctly on resize/maximize, but a residual "user must hover the cursor over WhatsApp" issue remained for some snap/resize scenarios. The log evidence: WhatsApp's `GetWindowRect` (used by `WindowTracker`) reported one size, but WGC kept delivering frames at a different size. Without a fresh WGC frame at the new size, the envelope check rejected every readback and detection couldn't run until the user provoked WhatsApp into emitting a paint by hovering.
+
+---
+
+**Fix 5 — `IWindowTracker.RequestRepaintOfTrackedWindow()`.** Added `IWin32Api.InvalidateClientArea(hwnd)` wrapping `InvalidateRect(hwnd, NULL, FALSE)` (allowed cross-process, marks the entire client area dirty). Added `IWindowTracker.RequestRepaintOfTrackedWindow()` — resolves the tracked HWND via `_profile.FindWindowHandle()` and calls `InvalidateClientArea`. `TrayOrchestrator.OnBoundsChanged` calls this at the end of every dispatch — explicitly NOT gated on `OverlaySizeChanged`, because the `OnVisibleRegionChanged → OnBoundsChanged` race (Bug 3 from the previous round) means `OverlaySizeChanged` can return false even after a real size change. The repaint usually produces a fresh WGC frame within ~50–200 ms; the existing 400 ms delayed-retry then runs detection on the freshly-captured frame.
+
+**Tests.** 3 new tests: orchestrator calls `RequestRepaintOfTrackedWindow` on every `BoundsChanged`; tracker's `RequestRepaintOfTrackedWindow` calls `InvalidateClientArea` on the resolved HWND; tracker's no-op when no HWND can be found.
+
+---
+
+**Known limitation — internal-divider drags during static periods.** Smoke-test confirmed `OnBoundsChanged` paths now converge without user hover. A separate residual scenario remains: internal WhatsApp layout changes that emit no `BoundsChanged` event (e.g. dragging the chat-list/conversation divider inside WhatsApp itself, or WhatsApp finishing a content-load reflow). Log evidence: chat-list rect changed from 329 to 610 px between two cadence ticks separated by ~4 seconds; during 3 seconds of that window WGC delivered no frames at all (WhatsApp content was static). The cadence (every 30 frames) doesn't tick when no frames arrive. The user's hover provokes WhatsApp into emitting a paint, WGC starts delivering again, the next cadence tick re-detects.
+
+**Deferred fix.** A wall-time `DispatcherTimer` (~3 s interval) calling `RequestRepaintOfTrackedWindow` while blur is active would force WGC to deliver fresh frames even when WhatsApp is static. Deferred from v0.2.0 because (a) it imposes a steady CPU/battery cost on a privacy-first background app, and (b) the limitation is narrow: requires active blur + WhatsApp foreground + no user input + internal layout change. Better suited as an opt-in v0.4.0 setting once the broader settings UI lands.
+
+Test counts: Core 102/102, App 84/84 (x64). Build: 0 errors, 1 pre-existing Win2D AnyCPU warning.
+
+---
+
+### 2026-05-03 — v0.2.0 clip composition: race-safe self-validation + delayed-retry
+
+**Context.** Smoke-test of the previous round's stale-frame validation + continuous detection fix exposed two more failure modes the cadence-only model didn't cover. With scope=ChatList, maximizing WhatsApp produced a wrong clip; the user had to hover the cursor over WhatsApp before the clip snapped to the correct chat-list rect.
+
+---
+
+**Bug 3 — `OnVisibleRegionChanged` updates bounds before `OnBoundsChanged` size-change clear.** Maximize fires both events. `OnVisibleRegionChanged`'s UI handler lands first and calls `ShowOverlay` → `CacheCurrentOrDefaultBounds`, which overwrites `_lastKnownBounds` with the new size. When `OnBoundsChanged`'s UI handler finally runs, `previousBounds = _lastKnownBounds = newBounds` already; `OverlaySizeChanged` returns false; the size-change clear DOES NOT run. `RecomputeAndApplyClip` then runs with new bounds and stale cached content size, computing a wrong clip (e.g. 1920/1318 = 1.457 horizontal stretch). Confirmed in the smoke log at lines 1208 and 1218.
+
+**Bug 4 — first post-resize WGC frame captures WhatsApp mid-responsive-layout.** Even when detection re-runs after maximize, the FIRST post-resize WGC frame captures WhatsApp during its responsive-layout transition (chat list at intermediate width). Detection on it produces transitional rects. WhatsApp content then goes static, no further frames arrive, and the cadence (every 30 frames) doesn't tick until the user nudges WhatsApp into repainting.
+
+---
+
+**Fix 3 — self-validating `RecomputeAndApplyClip`.** Top of the method now runs the same envelope check used by readback validation (extracted as `IsScaleRatioConsistent`: maximized ≈ 1.000 or windowed ≈ 1.012/1.009, ±0.03). When `_lastContentWidth × _lastContentHeight` produces a ratio against `_lastKnownBounds` outside the envelope, clears `_lastDetectionResult` / `_lastContentWidth/Height` and falls back to full coverage. Centralizes the staleness check so it covers any path that mutates bounds — not just `OnBoundsChanged`.
+
+**Fix 4 — debounced delayed-retry RunDetection.** New `internal delegate IDisposable DelayedUiDispatch(TimeSpan delay, Action action)` plumbed through the orchestrator constructor, defaulting to a `DispatcherTimer` wrapper in production and to a no-op in tests (with an opt-in capturing override for the new tests). Every `OnBoundsChanged` handler ends with `ScheduleDelayedDetectionRetry`: it disposes any pending pre-existing timer (debounce — drag fires many events, only the last retry remains) and schedules a fresh `RunDetection` 400 ms later. By that time WhatsApp's responsive-layout transition has settled and the cached input frame holds the steady state. The pending timer is also disposed in `TearDownCaptureAndOverlay` so a torn-down session doesn't leak retries.
+
+**Tests.** Three new App tests: (a) self-validating clip auto-clears when an `OnVisibleRegionChanged` race produces an inconsistent bounds/content ratio; (b) delayed retry runs `RunDetection` when its scheduled action fires; (c) rapid `BoundsChanged` events dispose the prior pending retry (debounce). All existing tests still pass.
+
+Test counts: Core 100/100, App 81/81 (x64). Build: 0 errors, 1 pre-existing Win2D AnyCPU warning.
+
+---
+
+### 2026-05-03 — v0.2.0 clip composition: stale-frame validation + continuous detection
+
+**Context.** Three previous fix attempts on the v0.2.0-clip-composition branch did not converge the scope clip in three failure modes: left-edge resize, maximize, and internal-divider drag (chat-list/conversation divider in WhatsApp itself). An Opus recon session traced the residual symptoms to two layered bugs.
+
+---
+
+**Bug 1 — stale-frame readback in `RunDetection`.** Sequence: `BoundsChanged` fires on a resize. The Session B fix correctly clears `_lastDetectionResult` and `_lastContentWidth/Height`. The orchestrator then calls `RunDetection("OnBoundsChanged")` as a best-effort fast path. That call reads back whatever frame is currently cached in the blur pipeline — at this moment, the *pre-resize* frame. Detection runs on stale pixels, then writes the stale rects + stale content size into the cache. The very next `RecomputeAndApplyClip` pairs *new bounds* with *old content size*, computing a clip rect through the wrong scale ratio (e.g. 1.596 instead of 1.000 on maximize from default to full-screen).
+
+**Bug 2 — detection gated by one-shot `_detectionDone`.** Detection only ran on the first frame of a capture session and on `BoundsChanged`. WhatsApp's internal divider can be dragged without the window resizing — no `BoundsChanged` fires, so `_detectionDone` stays at 1, no re-detection ever fires, the clip stays pinned to the old divider position forever.
+
+---
+
+**Fix 1 — validate readback frame dimensions before caching.** New `IsReadbackFrameConsistentWithBounds` helper in `TrayOrchestrator`. Before writing `_lastContentWidth/Height/_lastDetectionResult`, it computes the bounds-to-content scale ratio and checks it lies within ±0.03 of either the maximized envelope (≈1.000) or the windowed envelope (≈1.012 horizontal, ≈1.009 vertical — the 14×7 px DWM gap that `NormalizeWindowRect` strips on maximize). If not, the frame is from BEFORE the latest size change; detection is skipped, no cached state is written, and a diagnostic log line records bounds, frame size, and the computed scale ratios. The privacy-safe full-coverage fallback in `RecomputeAndApplyClip` holds until the next post-resize frame arrives via `OnFrameArrived`.
+
+**Fix 2 — continuous detection.** `_detectionDone` field and all reset paths removed. `OnFrameArrived` now triggers detection when `count == 1 || count % DetectionCadenceFrames == 0` with `DetectionCadenceFrames = 30`. `_frameCount` is reset in `TearDownCaptureAndOverlay` so each new capture session's first frame triggers detection. The existing `RunDetection("OnBoundsChanged")` best-effort fast path stays — Fix 1 makes it safe to call even when the cache may hold a stale frame, and when the cache is fresh it converges sooner than waiting for the next cadence tick. Latency budget for the worst case (cadence-only convergence at 30 fps) is ~1 s.
+
+**Diagnostic log.** Single-line `clip-compose` log added at the join point in `RecomputeAndApplyClip`, printing `_lastKnownBounds`, `_lastContentWidth × _lastContentHeight`, computed `scaleX × scaleY`, the converter's input `captureRect`, and the output `scopeRect`. Pinned out as the single point that lets smoke tests for Layouts B (left-edge resize) and C (maximize) verify the new bounds and the cached content size are paired with the correct ratio.
+
+**Tests.** Five new App tests: stale-frame readback rejected (no detector call, no cached-state write); fresh readback accepted; maximized ratio (1.000) accepted; cadence-driven detection fires at frames 1 + 30 (verified by firing 30 frames and asserting `CallCount == 2`); internal-divider scenario (same bounds across many frames, detector returns different rects between cadence ticks, `_lastDetectionResult.ChatListRect` updates after the second cadence tick). The earlier `BoundsChanged_SizeChange_RearmsFirstFrameDetection_NextFrameDetects` test was replaced by `BoundsChanged_SizeChange_FastPath_RecoversWhenReadbackMatchesNewBounds` to reflect the cadence-only model. All existing privacy-invariant + size-change-clears-state tests still pass.
+
+Test counts: Core 100/100, App 78/78 (x64). Build: 0 errors, 1 pre-existing Win2D AnyCPU warning.
+
+---
+
 ### 2026-05-03 — E_NOINTERFACE audit: six sites eliminated across Blur module
 
 **Context.** A previous session fixed one `Marshal.GetObjectForIUnknown + managed-cast` site

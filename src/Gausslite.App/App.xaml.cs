@@ -86,10 +86,16 @@ public partial class App : Application
             throw;
         }
 
+        // TrayNotifier bridges TrayOrchestrator ↔ TaskbarIcon.
+        // Constructed after the orchestrator so SetTrayNotifier can be called immediately;
+        // Attach() is called in TrayIconHost.Initialize() once the TaskbarIcon is ready.
+        var trayNotifier = new TrayNotifier();
+        ((TrayOrchestrator)_orchestrator).SetTrayNotifier(trayNotifier);
+
         try
         {
             StartupLog.Info("Constructing TrayIconHost...");
-            _trayIconHost = new TrayIconHost(_orchestrator);
+            _trayIconHost = new TrayIconHost(_orchestrator, trayNotifier);
             StartupLog.Info("TrayIconHost constructed.");
         }
         catch (Exception ex)
