@@ -9,6 +9,7 @@ using Gausslite.Core.Blur;
 using Gausslite.Core.Capture;
 using Gausslite.Core.Detection;
 using Gausslite.Core.Diagnostics;
+using Gausslite.Core.ScreenShare;
 using Gausslite.Core.WindowTracking;
 using Gausslite.Overlay;
 using Windows.Graphics.Capture;
@@ -35,6 +36,20 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
     private readonly IAppProfile _profile;
     private readonly IRegionDetector _regionDetector;
     private ITrayNotifier? _trayNotifier;
+    private IScreenShareDetector? _screenShareDetector;
+
+    // ── Auto-blur state machine for screen-share detection (v0.3.0) ──
+    // _shareIsActive mirrors the detector's last-emitted state. The other three flags
+    // implement "auto-enable on share start, restore on share end, manual override sticks
+    // for the rest of THIS share". All four are written and read on the UI thread only.
+    private bool _shareIsActive;
+    private bool _autoEnabledForCurrentShare;
+    private bool _userOverrodeForCurrentShare;
+    private bool _preShareBlurWasOn;
+    // True while the auto-enable / auto-restore code is running.  Public EnableBlur /
+    // DisableBlur check this so that auto-initiated calls don't get accounted as
+    // "user took control during share" — only real user-driven toggles do.
+    private bool _isAutoToggle;
     private readonly UiThreadDispatch _dispatchToUiThread;
     private readonly BackgroundDispatch _dispatchToBackground;
     private readonly DelayedUiDispatch _scheduleDelayedOnUi;
@@ -120,6 +135,20 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
     // TrayNotifier is ready (before TrayIconHost.Initialize attaches the TaskbarIcon).
     internal void SetTrayNotifier(ITrayNotifier? notifier) => _trayNotifier = notifier;
 
+    // Wire the screen-share detector after construction.  Optional dependency: when null,
+    // the orchestrator behaves exactly as in v0.2.0 (no auto-toggling on share events).
+    // Production wiring lives in App.xaml.cs; tests inject a fake to drive transitions.
+    public void SetScreenShareDetector(IScreenShareDetector? detector)
+    {
+        if (_screenShareDetector is not null)
+            _screenShareDetector.StateChanged -= OnScreenShareStateChanged;
+
+        _screenShareDetector = detector;
+
+        if (_screenShareDetector is not null)
+            _screenShareDetector.StateChanged += OnScreenShareStateChanged;
+    }
+
     internal TrayOrchestrator(
         IWindowTracker windowTracker,
         ICaptureEngine captureEngine,
@@ -152,6 +181,78 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
     {
         if (IsBlurEnabled) DisableBlur();
         else EnableBlur();
+    }
+
+    private void OnScreenShareStateChanged(object? sender, ScreenShareState newState)
+    {
+        // Detector ticks may arrive on the scheduler thread; production scheduler is the
+        // WPF UI dispatcher (one and the same), but be defensive in case a test scheduler
+        // ticks elsewhere.  Marshalling onto the UI thread keeps all auto-blur state
+        // mutations on a single thread, matching the rest of the orchestrator.
+        _dispatchToUiThread("OnScreenShareStateChanged", () =>
+        {
+            if (newState == ScreenShareState.Active)
+                HandleShareStarted();
+            else
+                HandleShareEnded();
+        });
+    }
+
+    private void HandleShareStarted()
+    {
+        if (_shareIsActive) return; // already in active state
+        _shareIsActive = true;
+        _preShareBlurWasOn = IsBlurEnabled;
+
+        if (!IsBlurEnabled)
+        {
+            StartupLog.Info("ScreenShare: active share started — auto-enabling blur");
+            _isAutoToggle = true;
+            try { EnableBlur(); }
+            finally { _isAutoToggle = false; }
+            _autoEnabledForCurrentShare = true;
+
+            // Nudge the tracked window into repainting.  Cold-start of the WGC capture
+            // session takes ~200-450 ms; during that window, WGC only delivers a frame
+            // when WhatsApp actually paints.  If WhatsApp is idle (cursor not over it,
+            // no animations), the user sees the opaque privacy placeholder until the
+            // next natural paint — which feels like "blur didn't kick in until I moved
+            // the mouse over WhatsApp".  Same pattern + same fix as v0.2.0's
+            // OnBoundsChanged repaint nudge: invalidate WhatsApp's client area so a
+            // fresh paint is queued, ready for WGC to capture as soon as the session
+            // is set up.
+            _windowTracker.RequestRepaintOfTrackedWindow();
+        }
+        else
+        {
+            StartupLog.Info("ScreenShare: active share started — blur already on, no auto action");
+            _autoEnabledForCurrentShare = false;
+        }
+    }
+
+    private void HandleShareEnded()
+    {
+        if (!_shareIsActive) return;
+
+        // Snapshot flags before clearing.
+        bool wasAutoEnabled = _autoEnabledForCurrentShare;
+        bool userOverrode   = _userOverrodeForCurrentShare;
+        _shareIsActive = false;
+        _autoEnabledForCurrentShare = false;
+        _userOverrodeForCurrentShare = false;
+
+        if (wasAutoEnabled && !userOverrode && IsBlurEnabled)
+        {
+            StartupLog.Info("ScreenShare: active share ended — restoring pre-share blur state (off)");
+            _isAutoToggle = true;
+            try { DisableBlur(); }
+            finally { _isAutoToggle = false; }
+        }
+        else
+        {
+            StartupLog.Info(
+                $"ScreenShare: active share ended — leaving blur as-is (autoEnabled={wasAutoEnabled}, userOverrode={userOverrode}, blurOn={IsBlurEnabled})");
+        }
     }
 
     public void SetIntensity(BlurIntensityPreset preset)
@@ -194,6 +295,14 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
     public void EnableBlur()
     {
         if (IsBlurEnabled) return;
+
+        // User-initiated EnableBlur during an active share counts as "user took manual
+        // control" — the auto-restore on share-end will then leave blur as the user set
+        // it.  The auto-enable path also calls into this method but sets _isAutoToggle
+        // first so this side-effect is suppressed for the system's own toggles.
+        if (_shareIsActive && !_isAutoToggle)
+            _userOverrodeForCurrentShare = true;
+
         StartupLog.Info("EnableBlur: entry");
 
         StartupLog.Info("EnableBlur: starting WindowTracker...");
@@ -221,6 +330,21 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
     {
         StartupLog.Info("DisableBlur: entry");
         if (!IsBlurEnabled) return;
+
+        // If a share is currently active AND we auto-enabled blur for this share AND the
+        // user hasn't yet overridden, this disable is the user's first manual override.
+        // Record it and show a one-time friendly balloon explaining auto-blur will return.
+        // The share-ended handler runs DisableBlur with _isAutoToggle = true and clears
+        // _shareIsActive first, so the auto-restore path doesn't trigger this balloon.
+        if (_shareIsActive && !_isAutoToggle && _autoEnabledForCurrentShare && !_userOverrodeForCurrentShare)
+        {
+            _userOverrodeForCurrentShare = true;
+            StartupLog.Info("DisableBlur: user overriding auto-blur during active share");
+            _trayNotifier?.ShowBalloon(
+                "Blur is off for this share",
+                "We'll turn it back on automatically the next time you share your screen.",
+                NotificationIcon.Info);
+        }
 
         TearDownCaptureAndOverlay("DisableBlur");
         TransitionToIdle("DisableBlur");
@@ -589,7 +713,17 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
             if (!IsBlurEnabled)
                 return;
 
-            if (fullyOccluded)
+            // During an active screen share, the v0.2.0 bounds-based occlusion logic
+            // becomes unreliable: sharing apps (Zoom in particular) drop many small
+            // floating overlays on top of the tracked window — share-control toolbars,
+            // video tiles, layout selectors, annotation panels.  The Z-order subtraction
+            // ends up reporting 0 rects ("fully occluded") even when WhatsApp is mostly
+            // visible and its pixels leak into the shared stream around / through those
+            // overlays.  Privacy-first override: while a share is active, ignore the
+            // fully-occluded report and keep blurring the full window.  Worst case is
+            // some over-blur in regions truly covered by Zoom's UI — viewers see those
+            // regions covered by Zoom anyway, so over-blur there is invisible to them.
+            if (fullyOccluded && !_shareIsActive)
             {
                 TransitionToArmed("OnVisibleRegionChanged");
                 HideOverlay("OnVisibleRegionChanged");
@@ -646,7 +780,21 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
     }
 
     // True when the tracker reports a non-empty visible region (i.e. window is not fully occluded).
-    private bool HasVisibleRegion() => (_windowTracker.VisibleRegion?.Count ?? 0) > 0;
+    // During an active share, we override "fully occluded" to "fully visible" — see the
+    // OnVisibleRegionChanged comment for the privacy-first rationale.
+    private bool HasVisibleRegion() =>
+        _shareIsActive || (_windowTracker.VisibleRegion?.Count ?? 0) > 0;
+
+    // The orchestrator's view of WhatsApp's visible region in screen-DIP coordinates.
+    // Returns the WindowTracker's region by default; during an active share, returns
+    // the full window bounds regardless of z-order so the overlay covers the entire
+    // window (see OnVisibleRegionChanged comment for rationale).
+    private IReadOnlyList<Rect>? EffectiveVisibleRegion()
+    {
+        if (_shareIsActive && _lastKnownBounds.HasValue)
+            return new[] { _lastKnownBounds.Value };
+        return _windowTracker.VisibleRegion;
+    }
 
     // Computes the scope-aware clip and applies it to the overlay.
     // Reads: _lastKnownBounds, _windowTracker.VisibleRegion, _lastDetectionResult,
@@ -682,7 +830,7 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
             }
         }
 
-        var region = _windowTracker.VisibleRegion;
+        var region = EffectiveVisibleRegion();
         if (region is null || region.Count == 0)
         {
             _overlayWindow.SetClip(null);
@@ -1085,6 +1233,12 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
     {
         if (_disposed) return;
         _disposed = true;
+
+        if (_screenShareDetector is not null)
+        {
+            _screenShareDetector.StateChanged -= OnScreenShareStateChanged;
+            _screenShareDetector = null;
+        }
 
         _hotkeyService.HotkeyPressed -= OnHotkeyPressed;
 

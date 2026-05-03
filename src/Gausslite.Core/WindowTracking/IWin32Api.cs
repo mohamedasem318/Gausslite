@@ -41,4 +41,13 @@ public interface IWin32Api
     /// underlying <c>InvalidateRect</c> call succeeded.
     /// </summary>
     bool InvalidateClientArea(IntPtr hwnd);
+
+    /// <summary>
+    /// Enumerates every visible top-level window on the desktop and returns
+    /// <see cref="WindowInfo"/> records describing each.  Used by the screen-share
+    /// detector to scan for known share-control window signatures on each poll.
+    /// Windows whose process can't be opened (already exited, access denied) are
+    /// skipped silently.
+    /// </summary>
+    IReadOnlyList<WindowInfo> EnumerateVisibleWindows();
 }

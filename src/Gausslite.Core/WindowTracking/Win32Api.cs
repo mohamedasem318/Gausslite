@@ -128,6 +128,38 @@ public sealed class Win32Api : IWin32Api
         return result;
     }
 
+    public IReadOnlyList<WindowInfo> EnumerateVisibleWindows()
+    {
+        var results = new List<WindowInfo>(64);
+        NativeMethods.EnumWindows((hwnd, _) =>
+        {
+            if (!NativeMethods.IsWindowVisible(hwnd)) return true;
+
+            NativeMethods.GetWindowThreadProcessId(hwnd, out uint pid);
+            if (pid == 0) return true;
+
+            string procName;
+            try { using var proc = Process.GetProcessById((int)pid); procName = proc.ProcessName; }
+            catch { return true; }
+
+            var classSb = new StringBuilder(256);
+            NativeMethods.GetClassName(hwnd, classSb, 256);
+
+            string title = string.Empty;
+            int len = NativeMethods.GetWindowTextLength(hwnd);
+            if (len > 0)
+            {
+                var titleSb = new StringBuilder(len + 1);
+                NativeMethods.GetWindowText(hwnd, titleSb, len + 1);
+                title = titleSb.ToString();
+            }
+
+            results.Add(new WindowInfo(hwnd, pid, procName, classSb.ToString(), title));
+            return true;
+        }, IntPtr.Zero);
+        return results;
+    }
+
     private static class NativeMethods
     {
         public delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);

@@ -11,6 +11,7 @@ using Gausslite.Core.AppProfiles;
 using Gausslite.Core.Blur;
 using Gausslite.Core.Capture;
 using Gausslite.Core.Detection;
+using Gausslite.Core.ScreenShare;
 using Gausslite.Core.WindowTracking;
 using Gausslite.Overlay;
 using Windows.Graphics.Capture;
@@ -24,6 +25,7 @@ public partial class App : Application
     private TrayIconHost? _trayIconHost;
     private ITrayOrchestrator? _orchestrator;
     private IHotkeyService? _hotkeyService;
+    private IScreenShareDetector? _screenShareDetector;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -92,6 +94,15 @@ public partial class App : Application
         var trayNotifier = new TrayNotifier();
         ((TrayOrchestrator)_orchestrator).SetTrayNotifier(trayNotifier);
 
+        // ScreenShare detector — polls visible windows ~1 Hz looking for known
+        // share-control toolbars (Zoom, Teams, …).  When it transitions Idle↔Active,
+        // the orchestrator auto-enables / restores blur.  Started after wiring so the
+        // first tick has a fully-constructed orchestrator to call into.
+        _screenShareDetector = new WindowSignalScreenShareDetector(
+            new Win32Api(),
+            ScheduleScreenSharePoll);
+        ((TrayOrchestrator)_orchestrator).SetScreenShareDetector(_screenShareDetector);
+
         try
         {
             StartupLog.Info("Constructing TrayIconHost...");
@@ -116,7 +127,54 @@ public partial class App : Application
             throw;
         }
 
+        try
+        {
+            StartupLog.Info("Starting screen-share detector...");
+            _screenShareDetector!.Start();
+            StartupLog.Info("Screen-share detector started.");
+        }
+        catch (Exception ex)
+        {
+            StartupLog.Warn("Screen-share detector start failed.", ex);
+            // Non-fatal: app continues running with manual-only blur control.
+        }
+
         StartupLog.Info("OnStartup complete.");
+    }
+
+    // Schedules a recurring screen-share poll on the WPF UI dispatcher.  The detector
+    // emits StateChanged on this same thread, so the orchestrator can update auto-blur
+    // state inline without further marshaling.  Stopping the timer on dispose
+    // releases the captured handler.
+    private static IDisposable ScheduleScreenSharePoll(TimeSpan interval, Action onTick)
+    {
+        var dispatcher = Application.Current?.Dispatcher ?? Dispatcher.CurrentDispatcher;
+        var timer = new DispatcherTimer(DispatcherPriority.Background, dispatcher) { Interval = interval };
+        EventHandler? handler = null;
+        handler = (_, _) =>
+        {
+            try { onTick(); }
+            catch (Exception ex) { StartupLog.Warn("ScreenShare poll threw", ex); }
+        };
+        timer.Tick += handler;
+        timer.Start();
+        return new ScreenShareTimerStop(timer, handler);
+    }
+
+    private sealed class ScreenShareTimerStop : IDisposable
+    {
+        private readonly DispatcherTimer _timer;
+        private readonly EventHandler _handler;
+        public ScreenShareTimerStop(DispatcherTimer timer, EventHandler handler)
+        {
+            _timer = timer;
+            _handler = handler;
+        }
+        public void Dispose()
+        {
+            _timer.Stop();
+            _timer.Tick -= _handler;
+        }
     }
 
     private static void LogCrash(Exception? ex, bool fatal)
@@ -135,6 +193,7 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        _screenShareDetector?.Dispose();
         _trayIconHost?.Dispose();
         _orchestrator?.Dispose();
         _hotkeyService?.Dispose();

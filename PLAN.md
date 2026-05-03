@@ -137,6 +137,20 @@ covered by manual smoke tests.
   share end
 - Manual override (hotkey/tray toggle) still works in all states
 
+**v0.3.0 first slice (in progress on branch
+`v0.3.0-screen-share-detection`)**: detect "the user is *actively
+sharing the screen* right now" via well-known share-control window
+signatures, and auto-enable / restore blur on the share's start /
+end transitions. Apps covered: Zoom desktop, Microsoft Teams desktop,
+and any Chromium-based browser share (Meet, browser-Zoom, browser-Teams,
+browser-Discord). Discord desktop is a known limitation — its
+share-control UI is rendered as Chromium web content invisible to
+window enumeration; deferred to v0.3.1 (UIA tree-walking) or, for
+users who use Discord desktop primarily, the v0.4.0 "blur whenever
+any sharing app is running" opt-in toggle. Share-target detection
+(which monitor / window is being captured) deferred to a v0.3.x
+follow-up.
+
 ### v0.4.0 — "Polish"
 - Settings window (opened via tray menu → "Settings..."), separate
   from the tray menu's quick toggles. Tray menu stays as the primary
@@ -146,6 +160,15 @@ covered by manual smoke tests.
   Light/Medium/Heavy presets, or augments them with a custom value)
 - Screen-share client checklist: which sharing apps Gausslite should
   watch for (Zoom, Teams, Meet, Discord, OBS, etc.)
+- **Opt-in "blur whenever any sharing app is running" toggle.** v0.3.0's
+  default is precise: blur turns on only when there's positive evidence
+  of an *active* share (specific share-control window visible). This
+  toggle relaxes that to "if Zoom/Teams/Discord is running at all, blur
+  is on" — a heavy-handed but safe fallback. **Especially relevant for
+  Discord desktop**, whose active-share state is invisible to window
+  enumeration; users who use Discord desktop primarily can flip this
+  on to get coverage at the cost of blur being on whenever Discord is
+  open. Off by default
 - Auto-start with Windows toggle (off by default)
 - Optional "notify when blur is armed" toggle (off by default —
   armed-state silence remains the v0.1.0 default behavior; this
@@ -283,6 +306,23 @@ Append-only. One line per decision with date and rationale.
   conversation pane is the wider one. Filed as issue #30 with a proposed fix
   (horizontal-edge density analysis). Shipping region-aware blur with a broken
   heuristic would mis-blur the wrong pane; deferring wiring is the right call.
+- 2026-05-03: v0.3.0 split into smaller slices. First slice ships active-share
+  detection for Zoom desktop, Microsoft Teams desktop, and Chromium-based
+  browser shares (Meet, web Zoom, web Teams, web Discord). Detection is
+  positive-evidence only — process running alone is NOT enough; a
+  share-control window signature must be visible. Rationale: a
+  "process running" rule would mean blur is on all day for users who keep
+  Zoom in the system tray. Share-target detection (which monitor / window
+  is being captured) deferred to v0.3.x. The "blur whenever any sharing app
+  is running" alternative is deferred to v0.4.0 as an opt-in setting.
+- 2026-05-03: Discord desktop sharing is a known limitation in v0.3.0 first
+  slice. Recon confirmed Discord renders share controls as Chromium web
+  content (`Chrome_RenderWidgetHostHWND` legacy bridge), invisible to
+  EnumWindows / EnumChildWindows at any depth. UIA tree-walking can see the
+  content but adds polling CPU and complexity disproportionate to the
+  use-case priority. Deferred to v0.3.1 follow-up; users primarily on Discord
+  desktop can flip the v0.4.0 "blur whenever any sharing app is running"
+  toggle when it lands.
 
 ## Per-session checklist
 
