@@ -11,8 +11,15 @@ namespace Gausslite.Core.Diagnostics;
 /// </summary>
 internal static class DiagLog
 {
+    // Mirrors Gausslite.App.Diagnostics.StartupLog.MaxLogBytes. Both classes write to the
+    // same file; each enforces the cap independently via a stat() check before appending.
+    // Cross-class race windows can't grow the file past ~2× the cap, which is acceptable.
+    private const long MaxLogBytes = 5 * 1024 * 1024; // 5 MB
+
     private static readonly string LogPath =
         Path.Combine(AppContext.BaseDirectory, "gausslite-startup.log");
+
+    private static readonly object _writeLock = new();
 
     internal static void Info(string message) => Write("INFO", message, null);
 
@@ -30,11 +37,23 @@ internal static class DiagLog
                     sb.Append($"{Environment.NewLine}  {e.GetType().FullName}: {e.Message}{Environment.NewLine}{e.StackTrace}");
             }
             sb.AppendLine();
+            string entry = sb.ToString();
 
-            using var stream = new FileStream(LogPath, FileMode.Append, FileAccess.Write, FileShare.Read);
-            using var writer = new StreamWriter(stream);
-            writer.Write(sb.ToString());
-            writer.Flush();
+            lock (_writeLock)
+            {
+                try
+                {
+                    var fi = new FileInfo(LogPath);
+                    if (fi.Exists && fi.Length > MaxLogBytes)
+                        File.WriteAllText(LogPath, $"[{DateTime.Now:yyyy-MM-ddTHH:mm:ss.fff}] [INFO] gausslite-startup.log truncated (exceeded {MaxLogBytes / (1024 * 1024)} MB cap){Environment.NewLine}");
+                }
+                catch { /* size check is best-effort; fall through and keep writing */ }
+
+                using var stream = new FileStream(LogPath, FileMode.Append, FileAccess.Write, FileShare.Read);
+                using var writer = new StreamWriter(stream);
+                writer.Write(entry);
+                writer.Flush();
+            }
         }
         catch { /* never throw from logger */ }
     }

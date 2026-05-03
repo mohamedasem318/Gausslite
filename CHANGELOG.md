@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Diagnostic logs (`gausslite-startup.log`) no longer record the contents of window
+  titles for windows that aren't WhatsApp.  The per-window enumeration log written
+  during capture initialisation (up to the first 20 visible windows) used to record
+  process name, class name, and full title for each examined window — meaning browser
+  tab titles, document filenames, and similar data could land on disk.  Now records
+  only `title.len={n}` for non-matching windows; process and class are kept because
+  both are needed to debug "why didn't WhatsApp match?".  The screen-share-detected
+  transition log also no longer records the matched share-control window's title
+  (which for the browser signature contained the meeting host's domain); the app
+  name and window class already uniquely identify which signature fired.
+- `gausslite-startup.log` is now bounded at 5 MB within a session.  Both writers
+  (the `Gausslite.App` startup log and the `Gausslite.Core` diagnostic log target the
+  same file) check size before each append and truncate-then-restart if the file is
+  over the cap.  Earlier behaviour truncated only on each app launch, so a tray
+  session running for days could in principle accumulate megabytes of logs.
+- The screen-capture path now re-validates the WhatsApp window handle immediately
+  before passing it to `IGraphicsCaptureItemInterop.CreateForWindow` (`IsWindow` plus
+  a class-name re-check).  Closes a small race window where the kernel could destroy
+  the window and recycle its handle to another process between window enumeration
+  and capture-item creation; capturing a recycled handle would have meant blurring
+  some unrelated app's window thinking it was WhatsApp.
+- The full transitive NuGet dependency graph is now pinned via committed
+  `packages.lock.json` files (`<RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>`
+  on the 5 production + test csprojs).  Direct package versions were already pinned;
+  this closes the supply-chain gap where transitive dependencies could float across
+  `dotnet restore` runs.
+- Belt-and-suspenders: root `.gitignore` now covers `*.log` globally, so any future
+  log file that escapes its expected location can't accidentally be committed.
+
 ## [0.3.0] - 2026-05-03
 
 ### Changed

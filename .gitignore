@@ -60,6 +60,12 @@ secrets.json
 installer/Output/
 *.signed
 
+# Belt-and-suspenders: any *.log file anywhere in the tree.  Runtime logs live
+# under bin/ (already ignored) and tools/ has its own ignore rules, but any
+# accidental escape (e.g. a developer dropping a .log next to a .csproj while
+# diagnosing) won't get committed.
+*.log
+
 # UiaDump diagnostic logs (may contain message content)
 tools/UiaDump/*.log
 

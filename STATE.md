@@ -15,6 +15,35 @@ drags during static periods) for a v0.4.0 fix.
 
 ## Last session summary
 
+**2026-05-03 — Pre-public-release security audit + privacy hardening (branch `v0.3.0-security-audit`).**
+
+Pre-tag audit before v0.3.0 ships publicly. Three Explore agents in parallel covered native interop, privilege/data-leakage, and supply-chain/secrets/hygiene. Findings critically reviewed (several agent severities were overstated; one "phantom" finding was rejected); the real issues fixed in this PR are:
+
+- **[H1] Privacy leakage in `gausslite-startup.log`**: `CaptureItemFactory.FindProfileWindow` was logging the full window title of up to 20 examined non-matching visible windows during capture init — browser tab titles, document names, etc. `WindowSignalScreenShareDetector.Poll` was logging the full title of the matched share-control window on every Idle→Active transition; for the Browser signature that title contains the meeting host's domain. Fixed: replaced `title={title}` with `title.len={n}` in the per-window enumeration log (process and class kept for diagnostic value); dropped the title field entirely from the share-detection transition log (AppName + WindowClass already uniquely identify which signature fired).
+- **[H2] HWND validation gap before `CreateForWindow`**: `CaptureItemFactory.TryCreateForProfile` had a window between `FindProfileWindow` returning the HWND and `interop.CreateForWindow` consuming it during which the kernel could destroy the window and recycle the HWND value to another process. Capturing a recycled HWND would have meant blurring some unrelated window thinking it was WhatsApp — an anti-privacy outcome. Added `IsWindow(hwnd)` plus class-name re-check before `CreateForWindow`; either failing returns false and the next poll retries.
+- **[M1] Startup log unbounded within a session**: `StartupLog` truncated on each launch but had no in-session size cap, so a tray app running for days could in principle accumulate large logs. Added a 5 MB soft cap (`FileInfo.Length` check before each append, truncate-and-reset if over). Applied to both `Gausslite.App.Diagnostics.StartupLog` and `Gausslite.Core.Diagnostics.DiagLog` since both write to the same file.
+- **[M2] NuGet dependency graph not locked**: direct package references were pinned, but transitive versions could float across `dotnet restore` runs. Added `<RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>` to the 5 production+test csprojs (tools/* skipped — diagnostic-only), regenerated `packages.lock.json` in each. `--locked-mode restore` now succeeds, so future builds are reproducible.
+- **[L2] Belt-and-suspenders `*.log` ignore**: added `*.log` to root `.gitignore` so any future log file that escapes its expected location can't accidentally be committed.
+
+**[M3] D3DImageBridge `GetObjectForIUnknown` consistency — investigated, deferred to v0.3.1.** `D3DImageBridge.GetSharedHandleFromSurface` casts to `IDirect3DDxgiInterfaceAccess` (line 149) and `IDXGIResource` (line 166) using the `Marshal.GetObjectForIUnknown` + managed-cast pattern that v0.2.0 banned in `Gausslite.Core/Blur/`. Investigation:
+- Site 149 is structurally identical to v0.2.0 Sites A/B/C, which the original commit explicitly identified as safe-by-design (`IDirect3DDxgiInterfaceAccess` is a documented Microsoft tear-off — QI returns a distinct IUnknown identity that bypasses the projection table).
+- Site 166 (cast to `IDXGIResource`) is **not** the same risk class as Sites D/E/F. The v0.2.0 collision was specific to `ID3D11Device`'s identity collapsing with the WinRT `IDirect3DDevice` projection (one device per process). Textures are distinct COM objects per allocation; `dxgiResPtr` carries the texture's IUnknown, distinct from the surface projection.
+- Empirical: this code has shipped through v0.1.0/v0.2.0/v0.3.0 on real-hardware GPU; no `InvalidCastException` has ever surfaced in this code path.
+
+Conclusion: the conversion would be a consistency improvement, not a bug fix. Deferred to v0.3.1 with a tracking issue (to be filed). A regression integration test would require setting up a live Win2D surface + D3D9Ex device just to assert "no exception" — high LOC for a code path that's been stable for three releases.
+
+**Rejected agent findings (critical pushback).** Several agent flags didn't survive review:
+- "Phantom" `WindowsCreateString` HSTRING leak: per MSDN the function sets `hstring=NULL` on failure, so the early-return path doesn't leak.
+- Missing `SetLastError` on `EnumWindows`/`IsIconic`/etc.: code-quality nit, no security impact — these functions' failure modes are obvious from the return value.
+- `(IGraphicsCaptureItemInterop)Marshal.GetObjectForIUnknown(factoryPtr)` in `CaptureItemFactory:74`: different risk class from [M3] — `IGraphicsCaptureItemInterop` is a documented WinRT-projected interop interface and the canonical Microsoft sample pattern.
+- `RowDelta`/`ColumnDelta` "out-of-bounds read": call-site invariants (`y >= TitleBarIgnore > 0`, `x >= EdgeIgnorePixels = 5`) make the underflow unreachable. Not a real bug.
+
+**Verified non-findings (documented as audited and clean).** No network calls / telemetry / update checks; no registry writes; GPU pixel data is never logged or persisted (`TryReadLatestFrameAsBgra` → `_regionDetector.Detect()` → only the `Rect` coordinates are logged); `app.manifest` is `asInvoker` / `uiAccess=false` / no elevation; crash log content is stack traces only (no local variables); no secrets or PII anywhere in the working tree or git history; `tools/*.txt` recon outputs are correctly gitignored. Inno installer integrity audit deferred to the next PR (installer doesn't exist yet).
+
+**Tests.** No new tests added — the changes are either log-content (smoke-tested manually) or defensive Win32 plumbing in code paths without existing test infrastructure. Adding test seams just for these would be a heavier change than the fixes themselves. Test counts unchanged: Core 128/128, App 98/98 (x64). Build: 0 errors, 1 pre-existing Win2D AnyCPU warning. Locked-mode restore clean.
+
+---
+
 **2026-05-03 — v0.3.0 first slice: screen-share auto-detection for Zoom, Teams, and browser-based shares (branch v0.3.0-screen-share-detection).**
 
 Built the v0.3.0 "knows when to blur" first slice. Polls every second for known share-control windows; auto-enables blur on share start, restores prior state on share end. Manual overrides during a share stick for that share and trigger a one-time friendly tray balloon. Tray icon left-click now toggles blur.
@@ -230,10 +259,15 @@ WGC capture border, TFM bump to 22621)** — see HISTORY.md for full notes.
 
 ## Next up
 
-**v0.3.0 first slice is built and pending smoke test** (branch `v0.3.0-screen-share-detection`).
-Once the smoke test passes, the branch ships as a PR targeting `main`. Roadmap from here:
+**Security audit PR is built and pending smoke test** (branch `v0.3.0-security-audit`).
+Once smoke-tested, ship the PR, then proceed with the Inno installer + tag v0.3.0 + GitHub Release work.
 
 - **v0.3.x follow-ups (post-merge):**
+  - **Convert `D3DImageBridge` `GetObjectForIUnknown` sites to vtable dispatch**
+    (consistency with the v0.2.0 vtable-only rule in `Gausslite.Core/Blur/`).
+    Audit verified currently safe by COM design (see Recent decisions); this
+    is a code-shape improvement only.  File a tracking issue when the audit
+    PR merges.
   - **Discord desktop detection** via UIA tree-walking on Discord's main window
     ([issue #38](https://github.com/mohamedasem318/Gausslite/issues/38)). Need a
     new `tools/UiaShareProbe` recon round to pin down a stable share-only element name
@@ -267,6 +301,48 @@ None.
 ## Recent decisions
 
 (See `PLAN.md` Decisions Log for the full history.)
+
+- **2026-05-03 — Diagnostic logs redact third-party window titles by default.**
+  `gausslite-startup.log` is privacy-sensitive — it's written next to the .exe and
+  travels with the user.  The per-window enumeration log in `CaptureItemFactory`
+  and the share-transition log in `WindowSignalScreenShareDetector` no longer
+  record window titles of windows we don't own.  Process names and class names
+  stay (both are needed to debug "why didn't WhatsApp match" / "which signature
+  fired"), as does the title length (so "did the window have a title?" is still
+  diagnosable).  Titles of the matched WhatsApp window itself are non-sensitive
+  and remain.
+
+- **2026-05-03 — Both startup-log writers enforce a 5 MB cap.**
+  `Gausslite.App.Diagnostics.StartupLog` and `Gausslite.Core.Diagnostics.DiagLog`
+  write to the same `gausslite-startup.log` file.  Each runs a `FileInfo.Length`
+  check under its own lock before each append; when the file is over 5 MB it's
+  truncated to a single header line and the next append starts fresh.  The
+  cross-class race window is harmless (worst case is two truncate-headers in
+  rapid succession), so no cross-assembly synchronisation is needed.
+
+- **2026-05-03 — NuGet transitive graph is locked via `packages.lock.json`.**
+  `<RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>` is set in the
+  5 production + test csprojs.  `tools/*` projects are intentionally not locked
+  (diagnostic-only; never shipped).  Future builds use `dotnet restore --locked-mode`
+  in CI when CI lands.
+
+- **2026-05-03 — `CaptureItemFactory` re-validates the HWND before `CreateForWindow`.**
+  `IsWindow(hwnd)` plus a class-name re-check runs immediately before
+  `interop.CreateForWindow`.  Closes a small race window where the window could
+  be destroyed and the HWND recycled by the kernel for another process between
+  enumeration and capture-item creation — capturing a recycled HWND would mean
+  blurring an unrelated window, which is the exact opposite of what a privacy
+  app should do.
+
+- **2026-05-03 — `D3DImageBridge` `GetObjectForIUnknown` sites are safe-by-design; conversion deferred.**
+  Audit verified that the two `Marshal.GetObjectForIUnknown` + managed-cast sites in
+  `D3DImageBridge.GetSharedHandleFromSurface` are not subject to the v0.2.0 CsWinRT
+  projection collision: site 149 (cast to `IDirect3DDxgiInterfaceAccess`) goes
+  through Microsoft's documented tear-off that has a distinct IUnknown identity;
+  site 166 (cast to `IDXGIResource`) operates on a texture pointer whose IUnknown
+  is distinct from the surface projection (unlike the device-identity collapse
+  that bit Sites D/E/F in v0.2.0).  Vtable-dispatch conversion is tracked for
+  v0.3.1 as a consistency improvement, not a bug fix.
 
 - **2026-05-03 — Screen-share detection uses positive window evidence, not process running.**
   Detector matches against `KnownShareSignatures` — well-known share-control window
