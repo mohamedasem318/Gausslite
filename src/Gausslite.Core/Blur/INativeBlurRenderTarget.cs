@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 using Windows.Graphics.DirectX.Direct3D11;
 
 namespace Gausslite.Core.Blur;

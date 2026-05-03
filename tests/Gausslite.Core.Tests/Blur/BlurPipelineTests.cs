@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 using NSubstitute;
 using Gausslite.Core.Blur;
 using Gausslite.Core.Capture;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 // DiscordProbe — Discord-specific recon for v0.3.0 screen-share detection.
 //
 // ShareProbe only enumerates *top-level* windows. Discord is Electron/Chromium —
