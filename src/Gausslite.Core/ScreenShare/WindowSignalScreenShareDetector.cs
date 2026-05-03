@@ -94,7 +94,10 @@ public sealed class WindowSignalScreenShareDetector : IScreenShareDetector
         CurrentEvidence = match;
 
         if (match.HasValue)
-            DiagLog.Info($"ScreenShare: {match.Value.AppName} active share detected (class={match.Value.WindowClass}, title=\"{match.Value.WindowTitle}\")");
+            // Title intentionally omitted — for the Browser signature it contains the
+            // sharing site's domain (e.g. "<host>.com is sharing your screen.").
+            // AppName + WindowClass uniquely identify which signature fired.
+            DiagLog.Info($"ScreenShare: {match.Value.AppName} active share detected (class={match.Value.WindowClass})");
         else
             DiagLog.Info("ScreenShare: active share ended");
 

@@ -12,6 +12,8 @@
     <!-- x64 required: Win2D 1.3.0 ships native binaries that don't deploy under AnyCPU -->
     <Platforms>x64</Platforms>
     <PlatformTarget>x64</PlatformTarget>
+    <!-- Pin the full transitive dependency graph via packages.lock.json (committed). -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
   </PropertyGroup>
 
   <ItemGroup>

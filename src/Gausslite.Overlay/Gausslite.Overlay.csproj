@@ -13,6 +13,8 @@
     <WindowsPackageType>None</WindowsPackageType>
     <!-- Suppress MRT Core PRI-generation tooling (no resource packaging needed) -->
     <EnableCoreMrtTooling>false</EnableCoreMrtTooling>
+    <!-- Pin the full transitive dependency graph via packages.lock.json (committed). -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
   </PropertyGroup>
 
   <ItemGroup>

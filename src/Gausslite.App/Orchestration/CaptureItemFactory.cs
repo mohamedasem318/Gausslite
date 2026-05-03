@@ -44,6 +44,29 @@ internal sealed class CaptureItemFactory : ICaptureItemFactory
         if (hwnd == IntPtr.Zero)
             return false;
 
+        // ── Defensive HWND re-validation ────────────────────────────────────────────────────────────
+        //
+        // Between FindProfileWindow returning and CreateForWindow below, the window may have been
+        // destroyed and the HWND value recycled by the kernel for another window.  Capturing a
+        // recycled HWND would mean blurring some unrelated window thinking it's WhatsApp — an
+        // anti-privacy outcome.  IsWindow + class re-fetch is cheap and rules out both cases:
+        // recycled HWNDs (IsWindow=false until OS reuse) and same-PID-different-window (class differs).
+
+        if (!NativeMethods.IsWindow(hwnd))
+        {
+            DiagLog.Info($"CaptureItemFactory: HWND=0x{hwnd:X} no longer valid after enumeration; will retry next poll.");
+            return false;
+        }
+
+        var classCheckSb = new StringBuilder(256);
+        NativeMethods.GetClassName(hwnd, classCheckSb, 256);
+        string currentClass = classCheckSb.ToString();
+        if (!string.Equals(currentClass, foundClass, StringComparison.Ordinal))
+        {
+            DiagLog.Info($"CaptureItemFactory: HWND=0x{hwnd:X} class changed from '{foundClass}' to '{currentClass}' (recycled); will retry next poll.");
+            return false;
+        }
+
         // ── Activate IGraphicsCaptureItemInterop ─────────────────────────────────────────────────────
         //
         // .NET 6+ removed WindowsRuntimeMarshal.GetActivationFactory, so we call
@@ -135,7 +158,11 @@ internal sealed class CaptureItemFactory : ICaptureItemFactory
             bool match = _profile.IsAppWindow(procName, className, title);
 
             if (log && examined < 20)
-                DiagLog.Info($"CaptureItemFactory: examined HWND=0x{hwnd:X}, process={procName}, class={className}, title={title}, match={match}");
+                // Title content intentionally omitted — third-party windows' titles can carry
+                // sensitive content (browser tabs, document names, message previews).  We log
+                // length only so "did the window have a title?" remains diagnosable.  Process
+                // and class are kept because both can be needed to debug a missed match.
+                DiagLog.Info($"CaptureItemFactory: examined HWND=0x{hwnd:X}, process={procName}, class={className}, title.len={title.Length}, match={match}");
             examined++;
 
             if (match)
@@ -195,6 +222,9 @@ internal sealed class CaptureItemFactory : ICaptureItemFactory
 
         [DllImport("user32.dll")]
         public static extern bool IsWindowVisible(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        public static extern bool IsWindow(IntPtr hWnd);
 
         [DllImport("combase.dll", PreserveSig = true)]
         public static extern int RoGetActivationFactory(

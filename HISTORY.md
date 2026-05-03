@@ -6,6 +6,317 @@
 
 ## Session history
 
+### 2026-05-03 — Pre-public-release security audit + privacy hardening
+
+**Context.** v0.3.0 first slice ("auto-blur on active screen share detection")
+is on `main` (PR #37) but not yet tagged or publicly released.  Per the
+pre-release sequence in STATE.md, the next step before the installer + tag
++ GitHub Release work is a security audit.  The reasoning: this is a privacy
+app — a log file that leaks browser tab titles is worse than no app at all,
+and we don't want to package binaries we haven't reviewed.
+
+**Method.** Three Explore subagents in parallel:
+- one mapped every `[DllImport]`, `Marshal.*`, vtable-dispatch site, and COM
+  pointer lifecycle in `src/Gausslite.*`;
+- one inventoried all disk writes, tracked what each log line records,
+  and checked the privilege model + `app.manifest`;
+- one inventoried NuGet dependencies, scanned for secrets-in-repo and
+  secrets-in-history, and audited `.gitignore` coverage.
+
+Their findings were then critically reviewed before deciding the punch list —
+several agent severities turned out to be overstated, and one finding
+("phantom" HSTRING leak on `WindowsCreateString` failure) didn't survive
+contact with the MSDN docs.  The user's standing instruction is "be critical
+and push back on weak findings"; that filter was applied throughout.
+
+---
+
+**[H1] Privacy leakage in `gausslite-startup.log`.**
+
+`gausslite-startup.log` ships next to the .exe and travels with the user — if
+they zip up the install dir to email a bug report, the log goes with it.  Two
+log lines were leaking content of windows the user owns but Gausslite doesn't:
+
+- `CaptureItemFactory.FindProfileWindow` (line 138) was logging the full
+  window title of up to 20 examined non-matching visible windows during the
+  first-call diagnostic enumeration.  Browser titles include page titles
+  ("Inbox - jane@…"); Office titles include document filenames; chat apps
+  include the most recent conversation name.  None of that needs to be on
+  disk.
+- `WindowSignalScreenShareDetector.Poll` (line 97) was logging the full
+  window title of the matched share-control window on every Idle→Active
+  transition.  For Zoom and Teams that title is a stable signature string;
+  for the Browser signature it's `<host>.com is sharing your screen.` —
+  which leaks the meeting host's domain.
+
+**Fix — keep diagnostic value, drop the leaky bits.**  For the per-examined-
+window log, replaced `title={title}` with `title.len={n}`; process and class
+remain because both are needed to debug "why didn't WhatsApp match" (the
+profile predicate inspects all three).  For the share-detected log, dropped
+the title field entirely; AppName + WindowClass already uniquely identify
+which signature fired (each signature has a distinct `(AppName, ClassName)`
+pair).  The "active share ended" log was already a fixed string, no change.
+
+Worth noting: the matched-WhatsApp log line in `CaptureItemFactory`
+(`if (match)` branch) still logs `process={procName}, class={className}` —
+that's WhatsApp by definition (the only window the profile predicate matches),
+so it's non-leaky.
+
+---
+
+**[H2] HWND validation gap before `CreateForWindow`.**
+
+Between `FindProfileWindow` returning an HWND and the next line consuming it
+in `interop.CreateForWindow`, the kernel can in principle destroy the window
+and reuse the HWND value for an entirely different process's window.  The
+practical probability is low (HWND recycling typically takes longer than the
+microsecond gap between two adjacent statements), but the impact for a privacy
+app is severe: capturing a recycled HWND means blurring some unrelated app's
+window thinking it's WhatsApp — the exact inverse of the privacy contract.
+
+**Fix.**  Added `NativeMethods.IsWindow(hwnd)` plus a `GetClassName` re-check
+immediately before `CreateForWindow`.  If `IsWindow` returns false (HWND is
+no longer a valid window) or the class differs from what `FindProfileWindow`
+saw (HWND has been recycled to a same-PID-different-class window or a
+different process's window), `TryCreateForProfile` returns false and the
+calling polling loop retries on the next tick.  No new public surface added —
+the check uses the existing `CaptureItemFactory.NativeMethods` private
+P/Invoke wrapper.
+
+No unit test added.  `CaptureItemFactory` does P/Invoke directly today;
+making it test-mockable would be a much bigger refactor than the fix itself.
+The smoke test exercises the happy path, and the failure-path branch is a
+straightforward early return.
+
+---
+
+**[M1] Startup log unbounded within a single session.**
+
+`StartupLog` (and the parallel `DiagLog` in `Gausslite.Core` writing to the
+same file) truncates the log on each app launch (`File.WriteAllText(LogPath,
+string.Empty)` in the static ctor).  But there's no in-session cap.  A tray
+app running for days with frequent screen-share transitions could in
+principle accumulate megabytes of log content.  Realistic write rate is
+low (transition-driven, not per-frame), so this is a misbehavior safety net,
+not an active concern.
+
+**Fix.**  Both classes now run a `FileInfo.Length` check under their own
+intra-process lock before each append; when the existing file is over 5 MB
+they truncate it and write a single header line indicating the truncation,
+then continue with the new entry.  The cross-class race window (App's
+`StartupLog` and Core's `DiagLog` racing on the same file) is harmless: worst
+case is two truncate-headers in rapid succession, which is fine.  No
+cross-assembly synchronisation needed — the OS handles file-level concurrency
+via `FileShare.Read` + `FileMode.Append`.
+
+The crash log (`gausslite-crash.log`, written from `App.xaml.cs.LogCrash`) is
+left alone.  Crashes are rare enough that a multi-MB crash log would itself be
+a separate bug worth investigating; truncating it would lose information
+needed to diagnose the recurring crash.
+
+---
+
+**[M2] NuGet dependency graph not locked.**
+
+Direct package references (Win2D, Hardcodet.NotifyIcon, System.Drawing.Common,
+SharpDX, NSubstitute, xUnit, etc.) were pinned to specific versions, but
+transitive dependencies could float across `dotnet restore` runs — opening a
+small supply-chain attack window if a transitive package version were ever
+compromised on NuGet.
+
+**Fix.**  Set `<RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>`
+in the 5 production + test csprojs (`Gausslite.App`, `Gausslite.Core`,
+`Gausslite.Overlay`, `Gausslite.App.Tests`, `Gausslite.Core.Tests`).  Ran
+`dotnet restore --force`, generated `packages.lock.json` in each project
+(982/34/956/1127/1075 lines respectively), committed all 5 lock files.
+`dotnet restore --locked-mode` now succeeds; `dotnet build --configuration
+Release` is clean (0 errors, 1 expected Win2D AnyCPU warning); tests pass
+(Core 128/128, App 98/98).
+
+Tools projects (`tools/ShareProbe`, `tools/DiscordProbe`, `tools/UiaDump`,
+`tools/RegionDump`) are intentionally NOT locked — they're diagnostic-only,
+never shipped, and changes there are rare; lockfile maintenance burden isn't
+worth it.
+
+---
+
+**[L2] Belt-and-suspenders `*.log` ignore.**
+
+Runtime logs live in `bin/.../` which is already covered by the `[Bb]in/`
+gitignore entry.  Tool recon outputs are covered by `tools/.gitignore`'s
+`*.log` rule.  Both already work; this is theoretical defence against a
+developer dropping a `.log` somewhere unexpected.  Added a single `*.log`
+line to root `.gitignore`.
+
+---
+
+**[M3] `D3DImageBridge` `GetObjectForIUnknown` consistency — investigated, deferred.**
+
+This was the only finding flagged as a potential code change, and the user
+chose option C ("investigate first, decide after") rather than committing
+to either fix-now or defer-now up front.
+
+The two sites in question:
+- `D3DImageBridge.cs:149` — `(IDirect3DDxgiInterfaceAccess)Marshal.GetObjectForIUnknown(dxgiAccessPtr)`
+- `D3DImageBridge.cs:166` — `(IDXGIResource)Marshal.GetObjectForIUnknown(dxgiResPtr)`
+
+Both use the `GetObjectForIUnknown` + managed-cast pattern that v0.2.0 banned
+in `src/Gausslite.Core/Blur/` after fixing six analogous sites there.  The
+v0.2.0 commit (#33, `aa74da6`) explained the bug class:
+
+> CsWinRT IDirect3DSurface projection is alive and registered in the
+> ComWrappers global table, so GetObjectForIUnknown returns the managed
+> projection rather than a raw RCW.  Casting that projection to a private
+> COM interface routes through its CCW which has no entry → E_NOINTERFACE
+> → InvalidCastException ~90% of calls (GC-timing-dependent).
+
+But that commit also identified TWO subclasses:
+
+- **Sites A/B/C** (cast to `IDirect3DDxgiInterfaceAccess`): "worked by luck
+  in WARP/production (tear-off has different IUnknown) but violated the
+  pattern."
+- **Sites D/E/F** (cast to `ID3D11Device` after `GetInterface`): "throws in
+  production because the `ID3D11Device*` returned by `GetInterface` shares
+  IUnknown with the registered WinRT device on hardware GPU."
+
+Sites A/B/C didn't actually fail because `IDirect3DDxgiInterfaceAccess` is
+a documented Microsoft tear-off — its `QueryInterface` returns a pointer with
+a distinct IUnknown identity, so `GetObjectForIUnknown` returns a fresh RCW
+(not the registered surface projection), and the cast succeeds.  Sites D/E/F
+DID fail because `IDirect3DDevice`'s identity collapses with `ID3D11Device`'s
+IUnknown by D3D runtime design (one device per process).
+
+Mapping the two `D3DImageBridge` sites onto these classes:
+
+- **Site 149 = same as A/B/C.**  Cast to `IDirect3DDxgiInterfaceAccess`
+  after `Marshal.QueryInterface(surfacePtr, IDirect3DDxgiInterfaceAccess_GUID)`.
+  Tear-off semantics apply identically.  The "luck" here is documented design,
+  not actual luck.
+
+- **Site 166 ≠ D/E/F.**  Cast is to `IDXGIResource`, not `ID3D11Device`.
+  The pointer comes from `Marshal.QueryInterface(texture2DPtr, IID_IDXGIResource)`
+  where `texture2DPtr` is a `ID3D11Texture2D*` from `dxgiAccess.GetInterface`.
+  The texture is a distinct COM object with its own IUnknown identity (not the
+  device — each texture allocation is independent).  Per COM rules QI preserves
+  identity within an object, so `dxgiResPtr` shares IUnknown with `texture2DPtr`,
+  which is the texture's IUnknown — distinct from the WinRT `IDirect3DSurface`
+  projection's IUnknown.  `GetObjectForIUnknown(dxgiResPtr)` returns a fresh
+  RCW, not the surface projection, and the `IDXGIResource` cast succeeds.
+
+Empirical confirmation: `D3DImageBridge.GetSharedHandleFromSurface` runs on
+every captured frame (essentially: 30+ times per second while blur is active).
+This code has shipped through v0.1.0, v0.2.0, and v0.3.0 on the user's real
+hardware GPU — three releases of constant exercise.  An `InvalidCastException`
+in this path would manifest as visible blur failure within seconds of every
+launch; that's never been observed.
+
+**Conclusion: defer to v0.3.1 as a consistency improvement, not a bug fix.**
+
+A regression-guard integration test would require setting up a live
+`Win2D` `CanvasRenderTarget` *and* a `D3D9Ex` `Direct3DEx` device, then
+invoking `GetSharedHandleFromSurface` and asserting "no exception."  That's
+~50–100 LOC of test infrastructure for a code path that's been stable for
+three releases — high ratio of test maintenance burden to bug-prevention
+value.  The smoke test already exercises this path live every time the app
+runs.  Tracking issue (to be filed by the user when the audit PR merges) in
+v0.3.1 will do the actual conversion + add a small test alongside.
+
+---
+
+**Rejected agent findings (critical pushback that didn't go in the punch list).**
+
+- "Critical: HSTRING leak on `WindowsCreateString` failure" — false alarm.
+  Per MSDN the function sets `hstring` to `NULL` on failure (`hr < 0`), so
+  the early-return path doesn't have anything to leak.  Original code is
+  correct.
+- "High: missing `SetLastError = true` on `EnumWindows` / `IsIconic` /
+  `GetWindow` / `IsWindowVisible` / `MonitorFromWindow` / etc." — code-quality
+  nit, no security impact.  These functions' failure modes are obvious from
+  the return value (`false` / `IntPtr.Zero`); there's no diagnostic loss.
+  Adding `SetLastError = true` everywhere just for cosmetic consistency would
+  be churn.
+- "Critical: `(IGraphicsCaptureItemInterop)Marshal.GetObjectForIUnknown(factoryPtr)`
+  in `CaptureItemFactory:74`" — different risk class than `D3DImageBridge`.
+  `IGraphicsCaptureItemInterop` is a documented WinRT-projected interop
+  interface and the canonical pattern in Microsoft's own
+  `Windows.Graphics.Capture` samples; CsWinRT explicitly handles it.  No
+  collision risk.
+- "Medium: `RowDelta` / `ColumnDelta` out-of-bounds read in
+  `WhatsAppRegionDetector`" — agent didn't trace the call sites.
+  `RowDelta` accesses pixel row `y - 1`, but `y` starts at `TitleBarIgnore`
+  (a positive constant) so `y - 1 ≥ 0`.  `ColumnDelta` accesses column
+  `x - 1`, but `x` starts at `EdgeIgnorePixels = 5` so `x - 1 ≥ 4`.  Bounds
+  invariants hold by construction.
+
+---
+
+**Verified non-findings (audited and clean — documented for future reference).**
+
+- **Network calls / telemetry / update checks**: zero.  No `HttpClient`,
+  `WebClient`, `Socket`, `NamedPipe`, `gRPC`, no off-machine endpoints
+  anywhere in the source tree.
+- **Registry writes**: zero.  No `Microsoft.Win32.Registry` usage.
+- **GPU pixel persistence**: traced the full readback path —
+  `BlurPipeline.TryReadLatestFrameAsBgra` → `_regionDetector.Detect(pixels, …)`
+  → only the resulting `Rect` coordinates and a couple of integer scalars
+  are logged.  Pixel data lives in CPU memory only as long as a single
+  `Detect()` call, then GC'd.  Never written to disk, never sent over the
+  wire (which doesn't exist anyway, per above).
+- **Manifest privilege model**: `app.manifest` declares
+  `requestedExecutionLevel level="asInvoker" uiAccess="false"` — no
+  elevation, no UIAccess.  No installer-level elevation either (installer
+  not yet written; Inno installer audit deferred to the next PR).
+- **Crash log content**: `App.xaml.cs.LogCrash` writes type name + message +
+  stack trace per inner-exception chain, plus a timestamp.  No local
+  variables, no captured frame buffers, no third-party window state.  Safe.
+- **Secrets in repo / git history**: clean.  No `.env`, no `.pfx` / `.pem`,
+  no PEM-shaped private keys, no JWT-shaped strings, no AWS / GCP / Azure
+  keys.  Email addresses appear only in expected places (LICENSE,
+  COMMERCIAL.md, README.md, git author metadata).
+- **`tools/` recon outputs**: `git ls-files tools/` shows only source files
+  and READMEs — no `.txt`, no `.log`.  The recon outputs containing
+  third-party process / window data are correctly gitignored via
+  `tools/.gitignore`.
+- **SPDX headers**: confirmed present on all 66 .cs files in `src/` and on
+  the 5 production csproj's `LICENSE` machine identifier.  Compliance
+  surface for AGPL is in good shape.
+
+---
+
+**Files modified.**
+
+- `src/Gausslite.App/Orchestration/CaptureItemFactory.cs` — [H1] log
+  redaction (line 138 title→title.len), [H2] HWND re-validation block
+  before `CreateForWindow`, plus an `IsWindow` P/Invoke addition.
+- `src/Gausslite.Core/ScreenShare/WindowSignalScreenShareDetector.cs` —
+  [H1] log redaction (line 97 title field dropped).
+- `src/Gausslite.App/Diagnostics/StartupLog.cs` — [M1] 5 MB cap with
+  per-write `FileInfo.Length` check + intra-process lock.
+- `src/Gausslite.Core/Diagnostics/DiagLog.cs` — [M1] same 5 MB cap (mirror
+  of StartupLog).
+- `src/Gausslite.App/Gausslite.App.csproj`,
+  `src/Gausslite.Core/Gausslite.Core.csproj`,
+  `src/Gausslite.Overlay/Gausslite.Overlay.csproj`,
+  `tests/Gausslite.App.Tests/Gausslite.App.Tests.csproj`,
+  `tests/Gausslite.Core.Tests/Gausslite.Core.Tests.csproj` — [M2]
+  `<RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>`.
+- `src/Gausslite.App/packages.lock.json`,
+  `src/Gausslite.Core/packages.lock.json`,
+  `src/Gausslite.Overlay/packages.lock.json`,
+  `tests/Gausslite.App.Tests/packages.lock.json`,
+  `tests/Gausslite.Core.Tests/packages.lock.json` — [M2] generated by
+  `dotnet restore --force`.
+- `.gitignore` — [L2] `*.log` line added.
+- `STATE.md` — this session summary + recent decisions entries.
+- `HISTORY.md` — this verbose narrative.
+- `CHANGELOG.md` — `[Unreleased]` `### Security` block.
+
+**Tests / build.** Test counts unchanged (Core 128/128, App 98/98 on x64).
+Build clean (0 errors, 1 pre-existing Win2D AnyCPU warning).
+`dotnet restore --locked-mode` clean.
+
+---
+
 ### 2026-05-03 — v0.3.0 first slice: screen-share auto-detection (Zoom, Teams, browser)
 
 **Context.** v0.2.0 has shipped (PR #34). Next milestone per PLAN.md is v0.3.0
