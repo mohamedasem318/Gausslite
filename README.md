@@ -18,7 +18,7 @@ may follow post-v1.0 based on user demand.
 
 ## Status
 
-🚧 **In development.** Not yet publicly released. v0.1.1 has shipped
+🚧 **In development.** Not yet publicly released. v0.2.0 has shipped
 internally; public release is held until v0.x is feature-complete with
 a proper installer. Watch this repo for updates.
 
@@ -44,7 +44,7 @@ read a word of it). The blur is real; the deniability is up to you.
 
 - [x] **v0.1.0** — Overlay-based whole-window blur for WhatsApp Desktop
 - [x] **v0.1.1** — Renamed from internal codename, no functional changes
-- [ ] **v0.2.0** — Region-aware blur (chat list vs. conversation),
+- [x] **v0.2.0** — Region-aware blur (chat list vs. conversation),
       intensity presets, partial-occlusion handling
 - [ ] **v0.3.0** — Auto-activation: detect screen-share clients and
       which monitor/window they're capturing
