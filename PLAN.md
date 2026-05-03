@@ -320,9 +320,10 @@ Append-only. One line per decision with date and rationale.
   content (`Chrome_RenderWidgetHostHWND` legacy bridge), invisible to
   EnumWindows / EnumChildWindows at any depth. UIA tree-walking can see the
   content but adds polling CPU and complexity disproportionate to the
-  use-case priority. Deferred to v0.3.1 follow-up; users primarily on Discord
-  desktop can flip the v0.4.0 "blur whenever any sharing app is running"
-  toggle when it lands.
+  use-case priority. Deferred to v0.3.1 follow-up (tracked in
+  https://github.com/mohamedasem318/Gausslite/issues/38); users primarily on
+  Discord desktop can flip the v0.4.0 "blur whenever any sharing app is
+  running" toggle when it lands.
 
 ## Per-session checklist
 

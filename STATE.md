@@ -234,7 +234,8 @@ WGC capture border, TFM bump to 22621)** — see HISTORY.md for full notes.
 Once the smoke test passes, the branch ships as a PR targeting `main`. Roadmap from here:
 
 - **v0.3.x follow-ups (post-merge):**
-  - **Discord desktop detection** via UIA tree-walking on Discord's main window. Need a
+  - **Discord desktop detection** via UIA tree-walking on Discord's main window
+    ([issue #38](https://github.com/mohamedasem318/Gausslite/issues/38)). Need a
     new `tools/UiaShareProbe` recon round to pin down a stable share-only element name
     (e.g. "Stop streaming" button or "You're sharing" region). UIA polling carries CPU
     cost — only run while Discord is the active candidate, not always.
