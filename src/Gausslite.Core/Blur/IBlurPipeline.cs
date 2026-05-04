@@ -38,4 +38,14 @@ public interface IBlurPipeline : IDisposable
     /// </para>
     /// </summary>
     bool TryReadLatestFrameAsBgra(out byte[] bgraPixels, out int width, out int height, out int stride);
+
+    /// <summary>
+    /// Discards the cached input frame and staging texture so subsequent
+    /// <see cref="TryReadLatestFrameAsBgra"/> calls return <see langword="false"/> until a
+    /// fresh frame has been blurred. Call this when a capture session is torn down so the
+    /// next session's region-detection runs only on its own frames — never on stale pixels
+    /// from a previous session, which can mislabel chat-list / conversation panes when the
+    /// user restarts WhatsApp in a different UI direction (LTR ↔ RTL).
+    /// </summary>
+    void ClearCachedFrame();
 }

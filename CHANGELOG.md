@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-05-04
+
 ### Added
 - **Settings persistence.** Your blur intensity preset and region scope no longer
   reset every time you launch the app. Settings are stored as JSON at
@@ -15,9 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without complaining.
 - **"Auto-start with Windows" toggle** in the tray menu. Off by default. Writes a
   per-user entry to `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (no admin
-  needed). If you move or reinstall Gausslite to a different folder, the toggle
-  reads as "off" the next time you open the menu — flip it back on to point the
-  startup entry at the new path.
+  needed). If you move or reinstall Gausslite to a different folder, Gausslite
+  rewrites the entry on next launch so it always points at the current `.exe`.
 - **"Blur on any sharing app" toggle** in the tray menu (off by default). When on,
   any running Zoom desktop, Teams desktop, or Discord desktop is treated as an
   active share — even if Gausslite can't see a specific share-control window.
@@ -26,18 +27,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whenever any of those apps is running, not just during a share. Browsers are
   intentionally not in the trigger list (would mean blur is on whenever a browser
   is open).
+- **Installer + portable zip** as release artifacts. Per-user install at
+  `%LOCALAPPDATA%\Programs\Gausslite` (no admin / UAC required); portable zip
+  for users who don't want an installer.
+
+### Changed
+- Project metadata (`Authors`, `Company`, `Product`, `Version`, `Copyright`)
+  is now embedded in the executable, so the Properties dialog and Inno
+  installer wizard display the correct publisher and version.
+- App icon is now embedded in `Gausslite.App.exe` itself, so Explorer / Alt-Tab
+  / installer wizard show the Gausslite icon instead of the generic .NET icon.
 
 ### Fixed
-- **Privacy regression discovered in v0.3.5 smoke test** (the fix ships in v0.3.5
-  alongside the new toggles): when a screen share was active (either the existing
-  v0.3.0 detection or the new "blur on any sharing app" toggle) and WhatsApp got
-  fully hidden — minimized, covered by a fullscreen app, on a different virtual
-  desktop — the always-on-top blur overlay used to stay on screen, painting blurred
-  WhatsApp pixels on top of whatever app *was* visible. Those leaked pixels could
-  end up in the shared stream. The overlay now correctly moves offscreen when
-  WhatsApp is genuinely hidden, while still keeping blur engaged in the
-  Zoom-during-share case (where many small share-control overlays falsely report
-  WhatsApp as occluded but it's actually mostly visible to viewers).
+- **Privacy regression discovered in v0.3.5 smoke test:** when a screen share was
+  active (either the existing v0.3.0 detection or the new "blur on any sharing
+  app" toggle) and WhatsApp got fully hidden — minimized, covered by a fullscreen
+  app, on a different virtual desktop — the always-on-top blur overlay used to
+  stay on screen, painting blurred WhatsApp pixels on top of whatever app *was*
+  visible. Those leaked pixels could end up in the shared stream. The overlay
+  now correctly moves offscreen when WhatsApp is genuinely hidden, while still
+  keeping blur engaged in the Zoom-during-share case (where many small
+  share-control overlays falsely report WhatsApp as occluded but it's actually
+  mostly visible to viewers).
+- **Region-scope blur swapping when switching keyboard input language.** With
+  scope set to "Conversation" or "Chat list", pressing Shift+Alt to switch
+  Windows input language (or any small visual change in WhatsApp's right-side
+  text-input area) could cause the rail-side detector to flip its decision —
+  silently relabelling the chat list as the conversation pane and vice versa.
+  Effect: "scope=Conversation" would start blurring the chat list and the user
+  had to toggle blur off and on to recover. The orchestrator now locks the
+  rail side on the first successful detection of each capture session and
+  overrides the detector on any subsequent frame that disagrees, swapping
+  rects back into the locked orientation. The lock resets only on capture
+  teardown or window-bounds size change — both legitimate "layout might have
+  changed" signals — so a real WhatsApp UI-language change is still picked up
+  via toggling blur off / on.
+- **Region-scope mislabelled after restarting WhatsApp in a different UI
+  direction (LTR ↔ RTL).** Toggling blur off, restarting WhatsApp into
+  Arabic/Hebrew (or vice versa), and toggling blur on left chat-list and
+  conversation labels swapped — the rail-side lock was engaging on the
+  previous session's stale frame still cached in `BlurPipeline`, before the
+  new capture session had even produced its first frame. The capture session
+  teardown now explicitly clears the BlurPipeline frame cache, so
+  region-detection only ever runs on frames from the current session. New
+  `IBlurPipeline.ClearCachedFrame()` for that purpose.
+
+### Known limitations
+- Discord desktop sharing is still not auto-detected via window enumeration
+  (see #38). Workaround: enable "Blur on any sharing app" in the tray menu, or
+  use the global hotkey / tray left-click.
+- **Windows Defender Attack Surface Reduction (ASR)** with the rule "Use
+  advanced protection against ransomware" enabled may silently block the
+  unsigned binary on first launch (the OS shows a generic "Windows cannot
+  access" dialog instead of a SmartScreen prompt). ASR is off by default on
+  consumer Windows; this affects users with security-managed configurations.
+  Workaround until our binary builds enough cloud-protection reputation: open
+  PowerShell as Administrator and run
+  `Add-MpPreference -AttackSurfaceReductionOnlyExclusions "%LOCALAPPDATA%\Programs\Gausslite"`.
 
 ### Security
 - Diagnostic logs (`gausslite-startup.log`) no longer record the contents of window

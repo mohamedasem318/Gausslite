@@ -5,15 +5,60 @@
 
 ## Current milestone
 
-**v0.3.0 — "Knows when to blur"** (first slice in progress on branch
-`v0.3.0-screen-share-detection`)
+**v0.3.5 — "Minimum settings for beta + Win10 + installer"** (branch
+`v0.3.5-polish-and-ship`)
 
-v0.1.0, v0.1.1, and v0.2.0 are shipped. See PLAN.md for the full v0.3.0
-milestone definition and CHANGELOG.md for v0.1.x / v0.2.0 development
-history. Issue #35 tracks the v0.2.0 known limitation (internal-divider
-drags during static periods) for a v0.4.0 fix.
+v0.1.0, v0.1.1, v0.2.0, v0.3.0, and v0.3.5-minimum-settings are shipped on `main`.
+This branch adds the polish-and-ship layer: project metadata via
+`Directory.Build.props`, embedded app icon, Win10 19041 support (TFM downgrade +
+runtime `IsBorderRequired` guard), Inno installer, `build-release.ps1`, and
+release docs. After this merges, tag `v0.3.5` and create the GitHub Release.
 
 ## Last session summary
+
+**2026-05-04 — v0.3.5 polish-and-ship: metadata, icon, installer, smoke-tested (branch `v0.3.5-polish-and-ship`).**
+
+Bridged the gap between v0.3.5 code being merged on `main` and v0.3.5 being installable for the public beta. Smoke-tested end-to-end on Win11 22H2; ready to tag and release.
+
+**Project metadata.** New `Directory.Build.props` at repo root sets `Authors=Mohamed Assem`, `Company=Gausslite`, `Product=Gausslite`, `Copyright=(c) 2026 Mohamed Assem`, `Version=0.3.5`, `AssemblyVersion/FileVersion=0.3.5.0`, `Description`. Propagates to all 9 csprojs via SDK auto-generated assembly attributes. `app.manifest` `assemblyIdentity version` bumped from `1.0.0.0` to `0.3.5.0`. The compiled `.exe`'s Properties → Details dialog reads `Gausslite / Gausslite / 0.3.5.0 / (c) 2026 Mohamed Assem`.
+
+**Embedded app icon.** `<ApplicationIcon>Assets\tray-icon.ico</ApplicationIcon>` added to `Gausslite.App.csproj`. The icon already shipped as `Content` (so the tray loaded it from disk); now also embedded in the `.exe` resource table, so Explorer / Alt-Tab / installer wizard show the Gausslite icon.
+
+**Windows 10 support — attempted, dropped.** Lowered TFM to `19041` and tried gating `_session.IsBorderRequired = false` on `ApiInformation.IsPropertyPresent` + reflection-based setter (`typeof(GraphicsCaptureSession).GetProperty(...)`). Smoke-tested on Win11 22H2 — the reflection no-opped because `typeof(GraphicsCaptureSession)` resolves at *compile time* using the 19041 SDK projection, which doesn't have `IsBorderRequired` (added in 22621); `GetProperty()` returned null at runtime even on Win11. Result: yellow capture-indicator border was visible on Win11, regression vs the previous code. Reverted: TFM is back to `net8.0-windows10.0.22621.0` across all 5 production+test csprojs, `WinRTCaptureSession.IsBorderRequired` calls the property directly, the `ApiInformation` guard and reflection wrapper are gone. Win10 is **not supported** in v0.3.5; if a user asks, the principled fix is COM QI to `IGraphicsCaptureSession3` (the Win11 22H2 interface that exposes `put_IsBorderRequired`) — a v0.3.x follow-up worth maybe 30 minutes if there's actual demand.
+
+**Auto-start self-heal log line.** `RegistryAutoStartManager.Enable()` now logs a `StartupLog.Info` line on successful registry write — makes the install→uninstall→install-elsewhere self-heal visible in `gausslite-startup.log`. The reconciliation logic at `App.xaml.cs:62-65` was already correct; this is diagnostics-only.
+
+**Inno installer (`installer/Gausslite.iss`).** Per-user install at `{localappdata}\Programs\Gausslite` (no admin / UAC). Fixed `AppId={4BEC16D5-721D-4C2B-9B71-03CBF83653C6}` baked in once and never changed — future installer versions auto-upgrade old installs in place. `MinVersion=10.0.22621` matches the TFM floor. `[Registry]` removes the auto-start entry on uninstall (`HKCU\...\Run\Gausslite` with `deletevalue uninsdeletevalue dontcreatekey` — the installer never *creates* the value, only the in-app toggle does, but always cleans it up). `[UninstallDelete]` removes `{localappdata}\Gausslite\` (per-user state dir holding `settings.json`) plus explicit `gausslite-startup.log` / `gausslite-crash.log` entries inside `{app}` (runtime-created files Inno's `[Files]` cleanup doesn't track).
+
+**`build-release.ps1`.** PowerShell 7+ pipeline: reads version from `Directory.Build.props`, runs `dotnet publish -c Release -r win-x64 --self-contained true -p:SatelliteResourceLanguages=en` (multi-file — `PublishSingleFile=true` conflicts with `EnableCoreMrtTooling=false` which the project sets to avoid VS2022 AppxPackage tooling not in the dotnet CLI SDK), invokes ISCC.exe (auto-discovered from `HKLM:\...\Inno Setup 6_is1`), packs the publish output as `Gausslite-0.3.5-portable.zip` via `Compress-Archive`, prints SHA-256 hashes.
+
+**Smoke-test results (Win11 22H2).** All paths green after one Inno typo fix (`filesandfolders` → `filesandordirs` in `[UninstallDelete]`):
+- Install + Properties dialog metadata + embedded icon: ✓
+- Tray menu structure (Enable blur, intensity, region, Auto-start, Blur on any sharing app, Exit): ✓
+- Manual blur enable/disable + intensity change: ✓
+- Auto-blur on Zoom share start, off at share end: ✓
+- Settings persistence (intensity + region survive restart): ✓
+- Auto-start with Windows toggle writes `HKCU\...\Run\Gausslite`: ✓
+- Auto-start self-heal: moving the binary writes the new path on next launch; the new `RegistryAutoStartManager.Enable: wrote ...` log line appears as expected: ✓
+- Uninstall cleanup: install dir, `{localappdata}\Gausslite`, registry value, Start Menu shortcut all removed (one harmless cosmetic leftover: `{localappdata}\Gausslite` was sometimes left as an empty directory if File Explorer was browsing it during uninstall).
+
+**Defender ASR caveat (documented, not blocking).** Smoke test surfaced that Microsoft Defender's "Use advanced protection against ransomware" ASR rule (GUID `c1db55ab-c21a-4637-bb3f-a12568109d35`) silently blocks the unsigned binary because we have zero cloud reputation as a brand-new build. ASR is **off by default** on consumer Windows — only affects users with security-managed configurations. Documented in CHANGELOG known limitations with the `Add-MpPreference -AttackSurfaceReductionOnlyExclusions` workaround. Long-term fix is Microsoft's file-submission pipeline (https://www.microsoft.com/en-us/wdsi/filesubmission), which whitelists the file hash in cloud reputation — once whitelisted, ASR stops firing for all users globally.
+
+**Final output artifacts** (post-revert build):
+- `installer\Output\GaussliteSetup-0.3.5.exe` (~52 MB, Inno per-user installer)
+- `installer\Output\Gausslite-0.3.5-portable.zip` (~74 MB, no-install option)
+
+**Per-release checklist (recurring).** Every Gausslite public release should:
+1. Build artifacts via `build-release.ps1`.
+2. Submit *both* `GaussliteSetup-X.Y.Z.exe` and `Gausslite.App.exe` (from `publish/`) to Microsoft for analysis. They're different file hashes; both need whitelisting. Same Microsoft account each time so submissions correlate.
+3. Tag and create the GitHub Release with both artifacts attached + SHA-256 hashes in the notes.
+4. The "Submit other AVs (Norton, Kaspersky, etc.)" step is on-demand only — only if a beta tester reports their AV blocking us.
+
+**Status of this session.** Build clean (0 errors, 1 expected Win2D AnyCPU warning). Tests green: Core 140/140, App 110/110 (x64). Smoke-test passed on Win11 22H2. Ready to tag `v0.3.5` and create the GitHub Release after the user resubmits the final-build hashes to Microsoft.
+
+**Next session.** Realistic-scenario test pass for `ComputeVisibleRegion` + the orchestrator's visibility logic — table-driven tests for the cases the v0.3.5 privacy regression exposed (Spotify covers WhatsApp during share, Edge fullscreen, virtual desktop switch, Zoom transparent overlays). Do this BEFORE v0.4.0.
+
+---
 
 **2026-05-03 — v0.3.5 minimum settings for beta (branch `v0.3.5-minimum-settings`).**
 

@@ -1,5 +1,9 @@
 # Gausslite
 
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
+[![Latest release](https://img.shields.io/github/v/release/mohamedasem318/Gausslite)](https://github.com/mohamedasem318/Gausslite/releases/latest)
+[![Windows 11](https://img.shields.io/badge/Windows-11%2022H2%2B-0078D6?logo=windows)](#requirements)
+
 **Sharing your screen shouldn't expose your DMs.**
 
 Whether you're presenting to your professor while shit-talking them in the group
@@ -7,10 +11,6 @@ chat, or in a work meeting and the friend chat is going off — Gausslite quietl
 blurs WhatsApp Desktop the moment you start sharing your screen.
 
 ![Gausslite auto-blur demo](docs/media/demo.gif)
-
-> *Replace this GIF with the staged demo. Recommend ~3-5 seconds: WhatsApp
-> visible with fake DMs → click "Share Screen" in Zoom → blur snaps on. Tool:
-> [ScreenToGif](https://www.screentogif.com).*
 
 ---
 
@@ -35,25 +35,35 @@ blur disappears.
 
 ![Tray menu screenshot](docs/media/tray-menu.png)
 
-> *Replace with a screenshot of the tray right-click menu.*
-
 ## Get it
 
 Download the latest installer or portable zip from the
 [Releases page](https://github.com/mohamedasem318/Gausslite/releases/latest).
 
-- **Installer** (`GausslliteSetup-X.Y.Z.exe`) — recommended for most users.
-  Adds Gausslite to your Start Menu, registers an uninstaller.
+- **Installer** (`GaussliteSetup-X.Y.Z.exe`) — recommended for most users.
+  Per-user install (no admin / UAC), adds Gausslite to your Start Menu,
+  registers an uninstaller.
 - **Portable** (`Gausslite-X.Y.Z-portable.zip`) — unzip and run, no install.
 
 > **Why does Windows warn me about this?**
 >
-> The installer isn't code-signed yet (signing certificates cost ~$300/year and
-> Gausslite is a passion project). On first run, Windows SmartScreen will say
-> *"Windows protected your PC"*. Click **More info → Run anyway** to proceed.
-> The warning will disappear on its own once enough users have downloaded the
-> file. If you'd rather not click through, build from source — see
+> The installer isn't code-signed yet — signing certificates cost money and
+> Gausslite is a free side project. On first run, Windows SmartScreen will
+> say *"Windows protected your PC"*. Click **More info → Run anyway** to
+> proceed. The warning fades on its own as more users download the file.
+> If you'd rather not click through, build from source — see
 > [BUILDING.md](BUILDING.md).
+>
+> **Rare case — silent block instead of SmartScreen:** if you've enabled
+> Microsoft Defender's *"Use advanced protection against ransomware"* rule
+> (an opt-in Attack Surface Reduction policy, off by default on consumer
+> Windows; usually only on in enterprise-managed setups), Defender will
+> block the unsigned binary outright and you'll see a generic *"Windows
+> cannot access the specified device, path, or file"* dialog instead of
+> SmartScreen. Workaround until the binary builds enough cloud-protection
+> reputation: open PowerShell as Administrator and run
+> `Add-MpPreference -AttackSurfaceReductionOnlyExclusions "$env:LOCALAPPDATA\Programs\Gausslite"`,
+> then install. Most users won't hit this.
 
 ## Requirements
 
@@ -89,15 +99,15 @@ it). The blur is real; the deniability is up to you.
       presets, partial-occlusion handling, RTL support.
 - [x] **v0.3.0** — Auto-activation: detect Zoom / Teams / browser-based shares,
       blur fires within ~2 s of share start, manual override sticks per share.
-- [ ] **v0.3.1** — Discord desktop detection
-      ([#38](https://github.com/mohamedasem318/Gausslite/issues/38)).
-- [ ] **v0.3.2** — Share-target detection: skip blur when WhatsApp is on a
-      non-shared monitor
+- [x] **v0.3.5** — Settings persistence, "Auto-start with Windows" toggle,
+      "Blur on any sharing app" toggle (Discord-desktop workaround), installer
+      + portable zip.
+- [ ] **v0.3.x follow-ups** — Discord desktop UIA detection
+      ([#38](https://github.com/mohamedasem318/Gausslite/issues/38));
+      share-target detection
       ([#40](https://github.com/mohamedasem318/Gausslite/issues/40)).
-- [ ] **v0.4.0** — Settings window, blur intensity slider, auto-start with
-      Windows, settings persistence,
-      ["blur whenever any sharing app is running"](PLAN.md#v040--polish)
-      opt-in.
+- [ ] **v0.4.0** — Settings window, continuous blur intensity slider,
+      per-app share-client checklist, opt-in repaint timer, manual updater.
 - [ ] **v0.5.0** — Toast notification blur during screen sharing.
 - [ ] **v1.0.0** — Composite-window mode: share a Gausslite window that
       renders the desktop with selective blur baked in. No drivers, no signing.

@@ -1103,8 +1103,8 @@
       "gausslite.app": {
         "type": "Project",
         "dependencies": {
-          "Gausslite.Core": "[1.0.0, )",
-          "Gausslite.Overlay": "[1.0.0, )",
+          "Gausslite.Core": "[0.3.5, )",
+          "Gausslite.Overlay": "[0.3.5, )",
           "Hardcodet.NotifyIcon.Wpf": "[2.0.1, )",
           "System.Drawing.Common": "[8.0.7, )"
         }
@@ -1118,7 +1118,7 @@
       "gausslite.overlay": {
         "type": "Project",
         "dependencies": {
-          "Gausslite.Core": "[1.0.0, )",
+          "Gausslite.Core": "[0.3.5, )",
           "SharpDX": "[4.2.0, )",
           "SharpDX.Direct3D9": "[4.2.0, )"
         }

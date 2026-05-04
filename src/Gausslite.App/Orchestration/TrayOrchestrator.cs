@@ -95,6 +95,24 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
     private int _lastContentHeight;
     internal RegionDetectionResult? LastDetectionResult => _lastDetectionResult;
 
+    // Sticky rail-side lock. The detector's rail-side heuristic walks the outer edges
+    // of the frame looking for a quiet (vertically uniform) zone, which works for the
+    // steady-state WhatsApp UI but is sensitive to small per-frame perturbations:
+    // pressing Shift+Alt to switch Windows input language, for instance, can change a
+    // few pixels in the message-input area enough for the right-side edge walk to flip
+    // its decision and start labelling the chat list as the conversation pane.
+    // The actual WhatsApp UI direction (LTR vs RTL) only changes when the user changes
+    // WhatsApp's UI language — extremely rare during a session — so we lock the rail
+    // side on the first successful detection and override the detector on any
+    // subsequent frame that disagrees, swapping its chatListRect and conversationRect
+    // back into the locked orientation. The lock resets only when the capture session
+    // tears down (TearDownCaptureAndOverlay) or the WhatsApp window's bounds change
+    // (OnBoundsChanged size-change path) — both legitimate "layout might have changed"
+    // signals where re-detection from scratch is correct. Internal getter exposed for
+    // tests.
+    private RailSide? _lockedRailSide;
+    internal RailSide? LockedRailSide => _lockedRailSide;
+
     // Balloon-notification state — UI-thread only.
     private bool _hasEverDetected;
     private bool _detectionWasSucceeding;
@@ -507,6 +525,15 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
         _lastDetectionResult = null;
         _lastContentWidth    = 0;
         _lastContentHeight   = 0;
+        _lockedRailSide      = null;
+
+        // Clear the BlurPipeline's cached frame so the next session's region detection
+        // can't read stale pixels from this session. Without this, an OnBoundsChanged
+        // that fires after EnableBlur but before the new capture session's first frame
+        // would run RunDetection on the previous session's last frame — which mislabels
+        // chat-list/conversation when WhatsApp restarted with a different UI direction
+        // (e.g. user switched WhatsApp's UI language LTR ↔ RTL between sessions).
+        _blurPipeline.ClearCachedFrame();
 
         // Cancel any pending delayed RunDetection — the new session will start its own.
         _pendingDelayedDetection?.Dispose();
@@ -591,6 +618,7 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
                 _lastDetectionResult = null;
                 _lastContentWidth    = 0;
                 _lastContentHeight   = 0;
+                _lockedRailSide      = null;
                 StartupLog.Info($"OnBoundsChanged: size changed — cleared stale detection state");
             }
 
@@ -832,6 +860,7 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
                 _lastDetectionResult = null;
                 _lastContentWidth    = 0;
                 _lastContentHeight   = 0;
+                _lockedRailSide      = null;
             }
         }
 
@@ -989,6 +1018,39 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
         _lastContentHeight = h;
 
         var result = _regionDetector.Detect(pixels, w, h, s);
+
+        // Sticky rail-side lock — see field comment for rationale. First successful
+        // detection of the session locks the rail side; any subsequent detection that
+        // disagrees has its chatList/conversation rects swapped back into the locked
+        // orientation. Without this, a transient detector flip (e.g. on Shift+Alt
+        // input-language switch) would silently mislabel the panes for the rest of
+        // the session, and a "scope=Conversation" setting would clip against the
+        // wrong half of the window.
+        if (result.Succeeded)
+        {
+            if (_lockedRailSide is null)
+            {
+                _lockedRailSide = result.DetectedRailSide;
+                StartupLog.Info($"{source}: rail-side locked to {_lockedRailSide} for this capture session");
+            }
+            else if (_lockedRailSide.Value != result.DetectedRailSide)
+            {
+                StartupLog.Info(
+                    $"{source}: detector reported rail={result.DetectedRailSide} " +
+                    $"but locked={_lockedRailSide}; swapping rects to keep locked orientation");
+                result = new RegionDetectionResult
+                {
+                    Succeeded          = true,
+                    ChatListRect       = result.ConversationRect,
+                    ConversationRect   = result.ChatListRect,
+                    FailureReason      = string.Empty,
+                    DetectedRailSide   = _lockedRailSide.Value,
+                    RailSideLeftWidth  = result.RailSideLeftWidth,
+                    RailSideRightWidth = result.RailSideRightWidth,
+                };
+            }
+        }
+
         _lastDetectionResult = result;
 
         if (result.Succeeded)
