@@ -122,6 +122,26 @@ public sealed class BlurPipeline : IBlurPipeline
         }
     }
 
+    public void ClearCachedFrame()
+    {
+        if (_disposed) return;
+        lock (_cacheLock)
+        {
+            // Dispose all three together: BlurFrame's allocation guard ("if _renderTarget is
+            // null || dims wrong") only triggers full reallocation when the render target is
+            // missing or the wrong size. Keeping _renderTarget while clearing _cachedInputFrame
+            // breaks that invariant — the next BlurFrame would skip allocation and call
+            // UpdateCachedFrame with a null _cachedInputFrame, throwing NullReferenceException
+            // on every frame for the rest of the session.
+            _renderTarget?.Dispose();
+            _renderTarget = null;
+            _cachedInputFrame?.Dispose();
+            _cachedInputFrame = null;
+            _stagingTexture?.Dispose();
+            _stagingTexture = null;
+        }
+    }
+
     public void Dispose()
     {
         if (_disposed) return;

@@ -314,6 +314,7 @@ public partial class App : Application
             width = height = stride = 0;
             return false;
         }
+        public void ClearCachedFrame() { }
         public void Dispose() { }
     }
 }

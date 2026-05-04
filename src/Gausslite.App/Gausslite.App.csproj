@@ -9,6 +9,7 @@
     <WindowsPackageType>None</WindowsPackageType>
     <EnableCoreMrtTooling>false</EnableCoreMrtTooling>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\tray-icon.ico</ApplicationIcon>
     <!-- x64 required: Win2D 1.3.0 ships native binaries that don't deploy under AnyCPU -->
     <Platforms>x64</Platforms>
     <PlatformTarget>x64</PlatformTarget>

@@ -306,6 +306,108 @@ public sealed class BlurPipelineTests
         Assert.Equal(400, s);
     }
 
+    // ── ClearCachedFrame ─────────────────────────────────────────────────────
+
+    [Fact]
+    public void ClearCachedFrame_BeforeAnyFrame_DoesNothing()
+    {
+        var pipeline = CreatePipeline();
+        pipeline.Initialize(_device);
+
+        // Should be a no-op when nothing's cached. No exceptions.
+        pipeline.ClearCachedFrame();
+
+        Assert.False(pipeline.TryReadLatestFrameAsBgra(out _, out _, out _, out _));
+    }
+
+    [Fact]
+    public void ClearCachedFrame_AfterFrame_MakesNextReadbackReturnFalse()
+    {
+        SetupFullPipeline(100, 100);
+        var pipeline = CreatePipeline();
+        pipeline.Initialize(_device);
+        pipeline.BlurFrame(MakeFrame(100, 100));
+        pipeline.TryReadLatestFrameAsBgra(out _, out _, out _, out _);
+
+        // Reset interop to count fresh calls cleanly post-clear.
+        _interop.ClearReceivedCalls();
+
+        pipeline.ClearCachedFrame();
+
+        // After clear, readback returns false and never reaches the interop.
+        var ok = pipeline.TryReadLatestFrameAsBgra(out _, out _, out _, out _);
+        Assert.False(ok);
+        _interop.DidNotReceive().TryReadBgra(
+            Arg.Any<IBlurCanvasDevice>(), Arg.Any<ICachedFrame>(), Arg.Any<IBlurStagingTexture>(),
+            out Arg.Any<byte[]>(), out Arg.Any<int>(), out Arg.Any<int>(), out Arg.Any<int>());
+    }
+
+    [Fact]
+    public void ClearCachedFrame_DisposesCachedFrameAndStagingTexture()
+    {
+        var rt = MakeRenderTarget(100, 100);
+        var cf = MakeCachedFrame(100, 100);
+        var st = Substitute.For<IBlurStagingTexture>();
+        st.Width.Returns(100f); st.Height.Returns(100f);
+        _interop.CreateRenderTarget(Arg.Any<IBlurCanvasDevice>(), 100f, 100f).Returns(rt);
+        _interop.CreateCachedFrame(Arg.Any<IBlurCanvasDevice>(), 100f, 100f).Returns(cf);
+        _interop.CreateStagingTexture(Arg.Any<IBlurCanvasDevice>(), 100f, 100f).Returns(st);
+
+        var pipeline = CreatePipeline();
+        pipeline.Initialize(_device);
+        pipeline.BlurFrame(MakeFrame(100, 100));
+        pipeline.TryReadLatestFrameAsBgra(out _, out _, out _, out _);
+
+        pipeline.ClearCachedFrame();
+
+        cf.Received(1).Dispose();
+        st.Received(1).Dispose();
+    }
+
+    [Fact]
+    public void ClearCachedFrame_DisposesRenderTargetToo_AndNextBlurFrameReallocatesCleanly()
+    {
+        // Regression test: the render target MUST be disposed alongside the cached frame.
+        // BlurFrame's allocation guard only triggers full reallocation when _renderTarget is
+        // null or wrong-sized; if we kept the render target while nulling the cached frame,
+        // the next BlurFrame would skip allocation and call UpdateCachedFrame with a null
+        // _cachedInputFrame, throwing NRE on every frame. Verifies the full reallocation path
+        // runs after a clear-then-blur cycle.
+        var rt1 = MakeRenderTarget(100, 100);
+        var rt2 = MakeRenderTarget(100, 100);
+        var cf1 = MakeCachedFrame(100, 100);
+        var cf2 = MakeCachedFrame(100, 100);
+        _interop.CreateRenderTarget(Arg.Any<IBlurCanvasDevice>(), 100f, 100f).Returns(rt1, rt2);
+        _interop.CreateCachedFrame(Arg.Any<IBlurCanvasDevice>(), 100f, 100f).Returns(cf1, cf2);
+
+        var pipeline = CreatePipeline();
+        pipeline.Initialize(_device);
+        pipeline.BlurFrame(MakeFrame(100, 100));
+
+        pipeline.ClearCachedFrame();
+        rt1.Received(1).Dispose();
+        cf1.Received(1).Dispose();
+
+        // Next BlurFrame must trigger full reallocation (not throw NRE).
+        var frame2 = MakeFrame(100, 100);
+        var ex = Record.Exception(() => pipeline.BlurFrame(frame2));
+        Assert.Null(ex);
+        _interop.Received(2).CreateRenderTarget(Arg.Any<IBlurCanvasDevice>(), 100f, 100f);
+        _interop.Received(2).CreateCachedFrame(Arg.Any<IBlurCanvasDevice>(), 100f, 100f);
+        _interop.Received(1).UpdateCachedFrame(Arg.Any<IBlurCanvasDevice>(), cf2, frame2);
+    }
+
+    [Fact]
+    public void ClearCachedFrame_AfterDispose_DoesNotThrow()
+    {
+        var pipeline = CreatePipeline();
+        pipeline.Initialize(_device);
+        pipeline.Dispose();
+
+        // Defensive: avoid forcing the orchestrator to track Dispose state separately.
+        pipeline.ClearCachedFrame();
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private ICachedFrame MakeCachedFrame(float width, float height)

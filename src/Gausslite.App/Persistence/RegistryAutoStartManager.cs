@@ -48,6 +48,7 @@ internal sealed class RegistryAutoStartManager : IAutoStartManager
                 return false;
             }
             key.SetValue(ValueName, CurrentExePathQuoted(), RegistryValueKind.String);
+            StartupLog.Info($"RegistryAutoStartManager.Enable: wrote HKCU\\{RunKeyPath}\\{ValueName} = {CurrentExePathQuoted()}");
             return true;
         }
         catch (Exception ex)

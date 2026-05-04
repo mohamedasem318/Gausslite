@@ -10,8 +10,8 @@ public interface ICaptureSession : IDisposable
 
     /// <summary>
     /// When set to <c>false</c>, suppresses the system-drawn yellow capture-indicator border
-    /// that Windows 11 22H2+ (build 22621) renders around the captured window.
-    /// Silently ignored on older OS versions.
+    /// that Windows 11 22H2+ (build 22621) renders around the captured window. Required at
+    /// minimum-supported OS — <see cref="CaptureEngine"/> targets Windows 11 22H2 directly.
     /// </summary>
     bool IsBorderRequired { set; }
 }
