@@ -215,15 +215,37 @@ big public push yet).
 - Tray UI gains an apps section: per-app enable/disable, per-app
   region preferences
 
-### v1.0.0 — "Real privacy"
-- IDD driver: phantom monitor as a separate user-mode WDDM driver
-  (C++)
-- Compositor: real desktop in, selective-blur desktop out
-- User shares the phantom monitor in Zoom/Teams; real monitor stays
-  untouched
-- Installer signs driver and app with EV cert
-- Smoke test: blur invisible on real monitor, visible only in
-  phantom share
+### v1.0.0 — "Composite-window mode" (a.k.a. "Walmart IDD")
+The big architectural shift, but without drivers or signing.  User shares
+**a Gausslite window** in Zoom/Teams instead of their screen; that window
+renders a live mirror of the desktop with selective blur baked in (WhatsApp
+content blurred, everything else passed through).  Real monitor untouched —
+viewers only ever see the Gausslite-composited stream.
+
+- New compositor that pulls per-monitor frames via WGC and overlays the
+  blurred WhatsApp region in-place before presenting.
+- Single shareable window (toggleable per-monitor if multi-monitor).
+- Reuses existing region detection + blur pipeline; only the compositor
+  + window-host are new.
+- No driver, no kernel code, no signing required.  Everything runs in
+  user-mode — the "Walmart" version of the v2.0 IDD architecture.
+- Limitation vs. v2.0: the user has to remember to share the Gausslite
+  window instead of their full screen.  That's the trade-off for not
+  needing a signed driver.
+
+### v2.0.0 — "Real IDD" (phantom monitor via WDDM driver)
+The full version of the architecture v1.0 approximates.  Adds a phantom
+monitor as a separate user-mode WDDM driver (C++), and a kernel-mediated
+compositor.  User shares the phantom monitor in Zoom/Teams in the normal
+"share monitor" UI; real monitor stays untouched.
+
+- IDD (Indirect Display Driver) C++ project.
+- Driver-side compositor receiving frames from the user-mode app over
+  the IDD framebuffer pipe.
+- Installer signs driver and app with EV cert.
+- Gated on revenue: EV cert + driver development time is a real
+  investment.  v1.0 ships first specifically so we have something to
+  collect feedback / income / signal on before committing to v2.0.
 
 ## Non-goals
 
@@ -247,10 +269,11 @@ big public push yet).
 
 ## Open questions
 
-- For v1, which IDD sample to fork: Microsoft's IddCx sample or a
-  community fork? **Decide at v0.4.0.**
-- Code signing cost vs. ship-without-signing-and-accept-SmartScreen-warning
-  for early v1 alphas. **Decide before v1 starts.**
+- For v2, which IDD sample to fork: Microsoft's IddCx sample or a
+  community fork? **Decide at v1.0 ship time, before v2 work starts.**
+- Code signing cost vs. ship-without-signing-and-accept-SmartScreen-warning.
+  **v0.x and v1.0 ship unsigned (SmartScreen warning expected, documented
+  in README); v2.0 requires the EV cert because of the driver.**
 - Post-v1 multi-app support: should the IAppProfile interface allow
   user-defined profiles via a simple config file, or stay code-only
   with one profile per supported app? **Defer until/unless multi-app
@@ -365,6 +388,15 @@ Append-only. One line per decision with date and rationale.
   a browser is open, which is most of the day for most users — the toggle
   would be useless. Browser-based shares are still covered by the existing
   `Chrome_WidgetWin_1 + "is sharing your screen"` window-signature path.
+- 2026-05-04: v1.0 reframed from IDD driver to "composite-window mode" (a
+  shareable Gausslite window that mirrors the desktop with selective blur
+  baked in).  No driver, no signing, ships in user-mode.  Trade-off: user
+  must share the Gausslite window instead of the full screen.  Real IDD
+  (phantom monitor) becomes v2.0, gated on EV-cert investment.  Rationale:
+  the IDD work is large and gated on revenue; composite-window mode is the
+  smaller version that ships v1 features (full privacy via a window the
+  user explicitly shares) without the driver surface area, and gives us
+  something to validate / monetize before committing to v2.
 
 ## Per-session checklist
 
