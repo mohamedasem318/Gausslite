@@ -7,12 +7,14 @@ using System.Windows.Threading;
 using Gausslite.App.Diagnostics;
 using Gausslite.App.Hotkey;
 using Gausslite.App.Orchestration;
+using Gausslite.App.Persistence;
 using Gausslite.App.Tray;
 using Gausslite.Core.AppProfiles;
 using Gausslite.Core.Blur;
 using Gausslite.Core.Capture;
 using Gausslite.Core.Detection;
 using Gausslite.Core.ScreenShare;
+using Gausslite.Core.Settings;
 using Gausslite.Core.WindowTracking;
 using Gausslite.Overlay;
 using Windows.Graphics.Capture;
@@ -45,6 +47,22 @@ public partial class App : Application
 
         // --- Composition root ---
         // The only place new ConcreteType() is allowed for module types.
+
+        // Persisted user settings (v0.3.5). Load early so downstream construction
+        // can use Settings.Intensity / Settings.Scope etc. without a second pass.
+        ISettingsStore settingsStore = new JsonSettingsStore();
+        Settings settings = settingsStore.Load();
+        StartupLog.Info($"Settings loaded: Intensity={settings.Intensity}, Scope={settings.Scope}, AutoStart={settings.AutoStart}, ProcessHeuristic={settings.ProcessRunningHeuristicEnabled}");
+
+        IAutoStartManager autoStart = new RegistryAutoStartManager();
+
+        // Reconcile registry with the saved AutoStart preference. Idempotent — if the
+        // registry already matches Settings, no write occurs. If Settings says enabled
+        // but the registry got out of sync (e.g. user moved the .exe), this re-aligns.
+        if (settings.AutoStart && !autoStart.IsEnabled())
+            autoStart.Enable();
+        else if (!settings.AutoStart && autoStart.IsEnabled())
+            autoStart.Disable();
 
         // Create a shared D3D11 device (BGRA support required by Win2D).
         // Both CaptureEngine and BlurPipeline use this device so captured textures
@@ -99,15 +117,28 @@ public partial class App : Application
         // share-control toolbars (Zoom, Teams, …).  When it transitions Idle↔Active,
         // the orchestrator auto-enables / restores blur.  Started after wiring so the
         // first tick has a fully-constructed orchestrator to call into.
-        _screenShareDetector = new WindowSignalScreenShareDetector(
+        var screenShareDetector = new WindowSignalScreenShareDetector(
             new Win32Api(),
             ScheduleScreenSharePoll);
+        _screenShareDetector = screenShareDetector;
         ((TrayOrchestrator)_orchestrator).SetScreenShareDetector(_screenShareDetector);
+
+        // Apply persisted v0.3.5 settings to runtime state.
+        _orchestrator.SetIntensity(settings.Intensity);
+        _orchestrator.SetScope(settings.Scope);
+        if (settings.ProcessRunningHeuristicEnabled)
+            screenShareDetector.SetTriggerProcessNames(WindowSignalScreenShareDetector.DefaultTriggerProcessNames);
 
         try
         {
             StartupLog.Info("Constructing TrayIconHost...");
-            _trayIconHost = new TrayIconHost(_orchestrator, trayNotifier);
+            _trayIconHost = new TrayIconHost(
+                _orchestrator,
+                settingsStore,
+                autoStart,
+                screenShareDetector,
+                settings,
+                trayNotifier);
             StartupLog.Info("TrayIconHost constructed.");
         }
         catch (Exception ex)

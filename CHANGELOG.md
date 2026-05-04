@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Settings persistence.** Your blur intensity preset and region scope no longer
+  reset every time you launch the app. Settings are stored as JSON at
+  `%LOCALAPPDATA%\Gausslite\settings.json` (per-user; survives app reinstalls). If the
+  settings file is missing or corrupt, Gausslite falls back to first-run defaults
+  without complaining.
+- **"Auto-start with Windows" toggle** in the tray menu. Off by default. Writes a
+  per-user entry to `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (no admin
+  needed). If you move or reinstall Gausslite to a different folder, the toggle
+  reads as "off" the next time you open the menu — flip it back on to point the
+  startup entry at the new path.
+- **"Blur on any sharing app" toggle** in the tray menu (off by default). When on,
+  any running Zoom desktop, Teams desktop, or Discord desktop is treated as an
+  active share — even if Gausslite can't see a specific share-control window.
+  This is the workaround for Discord desktop sharing (which is invisible to
+  Gausslite's standard detection — see issue #38). Trade-off: blur turns on
+  whenever any of those apps is running, not just during a share. Browsers are
+  intentionally not in the trigger list (would mean blur is on whenever a browser
+  is open).
+
+### Fixed
+- **Privacy regression discovered in v0.3.5 smoke test** (the fix ships in v0.3.5
+  alongside the new toggles): when a screen share was active (either the existing
+  v0.3.0 detection or the new "blur on any sharing app" toggle) and WhatsApp got
+  fully hidden — minimized, covered by a fullscreen app, on a different virtual
+  desktop — the always-on-top blur overlay used to stay on screen, painting blurred
+  WhatsApp pixels on top of whatever app *was* visible. Those leaked pixels could
+  end up in the shared stream. The overlay now correctly moves offscreen when
+  WhatsApp is genuinely hidden, while still keeping blur engaged in the
+  Zoom-during-share case (where many small share-control overlays falsely report
+  WhatsApp as occluded but it's actually mostly visible to viewers).
+
 ### Security
 - Diagnostic logs (`gausslite-startup.log`) no longer record the contents of window
   titles for windows that aren't WhatsApp.  The per-window enumeration log written

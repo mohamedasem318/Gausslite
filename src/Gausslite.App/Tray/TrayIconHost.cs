@@ -8,7 +8,10 @@ using System.Windows.Media.Imaging;
 using Hardcodet.Wpf.TaskbarNotification;
 using Gausslite.App.Diagnostics;
 using Gausslite.App.Orchestration;
+using Gausslite.App.Persistence;
 using Gausslite.Core.Blur;
+using Gausslite.Core.ScreenShare;
+using Gausslite.Core.Settings;
 
 namespace Gausslite.App.Tray;
 
@@ -21,6 +24,10 @@ internal sealed class TrayIconHost : IDisposable
 {
     private readonly ITrayOrchestrator _orchestrator;
     private readonly TrayNotifier? _notifier;
+    private readonly ISettingsStore _settingsStore;
+    private readonly IAutoStartManager _autoStart;
+    private readonly WindowSignalScreenShareDetector _detector;
+    private Settings _settings;
     private TaskbarIcon? _taskbarIcon;
     private MenuItem? _toggleItem;
     private MenuItem? _intensityLightItem;
@@ -29,10 +36,22 @@ internal sealed class TrayIconHost : IDisposable
     private MenuItem? _scopeChatListItem;
     private MenuItem? _scopeConversationItem;
     private MenuItem? _scopeBothItem;
+    private MenuItem? _autoStartItem;
+    private MenuItem? _processHeuristicItem;
 
-    public TrayIconHost(ITrayOrchestrator orchestrator, TrayNotifier? notifier = null)
+    public TrayIconHost(
+        ITrayOrchestrator orchestrator,
+        ISettingsStore settingsStore,
+        IAutoStartManager autoStart,
+        WindowSignalScreenShareDetector detector,
+        Settings initialSettings,
+        TrayNotifier? notifier = null)
     {
         _orchestrator = orchestrator;
+        _settingsStore = settingsStore;
+        _autoStart = autoStart;
+        _detector = detector;
+        _settings = initialSettings;
         _notifier = notifier;
     }
 
@@ -116,6 +135,26 @@ internal sealed class TrayIconHost : IDisposable
         scopeSubmenu.Items.Add(_scopeBothItem);
         UpdateScopeCheckmarks(_orchestrator.CurrentScope);
 
+        // ── Persistent toggles (v0.3.5) ──────────────────────────────────────
+        _autoStartItem = new MenuItem
+        {
+            Header = "Auto-start with Windows",
+            IsCheckable = true,
+            IsChecked = _settings.AutoStart,
+        };
+        _autoStartItem.Click += (_, _) => OnAutoStartToggled();
+
+        _processHeuristicItem = new MenuItem
+        {
+            Header = "Blur on any sharing app",
+            IsCheckable = true,
+            IsChecked = _settings.ProcessRunningHeuristicEnabled,
+            ToolTip = "Treats any running Zoom / Teams / Discord desktop as an active share. " +
+                      "Catches Discord desktop sharing (which is invisible to window detection); " +
+                      "downside: blur turns on whenever those apps are running.",
+        };
+        _processHeuristicItem.Click += (_, _) => OnProcessHeuristicToggled();
+
         var exitItem = new MenuItem { Header = "Exit" };
         exitItem.Click += (_, _) => Application.Current.Shutdown();
 
@@ -123,6 +162,9 @@ internal sealed class TrayIconHost : IDisposable
         menu.Items.Add(_toggleItem);
         menu.Items.Add(intensitySubmenu);
         menu.Items.Add(scopeSubmenu);
+        menu.Items.Add(new Separator());
+        menu.Items.Add(_autoStartItem);
+        menu.Items.Add(_processHeuristicItem);
         menu.Items.Add(new Separator());
         menu.Items.Add(exitItem);
         _taskbarIcon.ContextMenu = menu;
@@ -144,6 +186,7 @@ internal sealed class TrayIconHost : IDisposable
         {
             _orchestrator.SetIntensity(preset);
             UpdateIntensityCheckmarks(preset);
+            PersistSettings(_settings with { Intensity = preset });
         };
         return item;
     }
@@ -162,8 +205,41 @@ internal sealed class TrayIconHost : IDisposable
         {
             _orchestrator.SetScope(scope);
             UpdateScopeCheckmarks(scope);
+            PersistSettings(_settings with { Scope = scope });
         };
         return item;
+    }
+
+    // ── v0.3.5 toggle handlers + persistence helper ─────────────────────────
+
+    private void OnAutoStartToggled()
+    {
+        // The checkable WPF item flips IsChecked before firing Click; read the new state.
+        bool desired = _autoStartItem!.IsChecked;
+        bool ok = desired ? _autoStart.Enable() : _autoStart.Disable();
+        if (!ok)
+        {
+            // Revert the visual toggle if the registry write failed.
+            _autoStartItem.IsChecked = !desired;
+            return;
+        }
+        PersistSettings(_settings with { AutoStart = desired });
+    }
+
+    private void OnProcessHeuristicToggled()
+    {
+        bool desired = _processHeuristicItem!.IsChecked;
+        _detector.SetTriggerProcessNames(
+            desired
+                ? WindowSignalScreenShareDetector.DefaultTriggerProcessNames
+                : Array.Empty<string>());
+        PersistSettings(_settings with { ProcessRunningHeuristicEnabled = desired });
+    }
+
+    private void PersistSettings(Settings updated)
+    {
+        _settings = updated;
+        _settingsStore.Save(updated);
     }
 
     private void UpdateScopeCheckmarks(BlurRegionScope selected)

@@ -280,31 +280,41 @@ public sealed class TrayOrchestratorScreenShareTests
         Assert.True(sut.IsBlurEnabled);
     }
 
-    // ── Occlusion override during active share ────────────────────────────────
-    // v0.2.0 occlusion logic walks Z-order and subtracts each above-Z window's
-    // bounds from the tracked window's rect.  During a screen share, sharing apps
-    // (Zoom in particular) drop many small floating overlays on top, fragmenting
-    // the visible region to zero even when the window is visually mostly visible.
-    // v0.3.0 override: while a share is active, ignore the fully-occluded report
-    // and keep the overlay shown over the full window.
+    // ── Visible region == empty during share ───────────────────────────────
+    // (Was previously the v0.3.0 "override during share" test asserting the
+    // overlay stays Active when the visible region drops to zero — i.e. that the
+    // orchestrator pretends the empty-region report is wrong during share, and
+    // keeps blurring the full window.)
+    //
+    // The Spotify smoke test exposed that this override is the wrong model: it
+    // makes the orchestrator paint blur on top of the cover.  The correct fix
+    // pushed down to ComputeVisibleRegion: WS_EX_TRANSPARENT covering windows
+    // (Zoom's annotation layer, etc.) are now skipped at the source, so during
+    // a real Zoom share the visible region stays full and the overlay covers
+    // WhatsApp correctly — without needing an orchestrator-level override.
+    // When the visible region IS empty, that's now an authoritative signal that
+    // WhatsApp is genuinely covered → hide.
 
     [Fact]
-    public void ShareActive_VisibleRegionDropsToZero_OverlayStaysOn()
+    public void ShareActive_VisibleRegionDropsToZero_OverlayHides()
     {
+        // Empty visible region during share now hides the overlay (no override).
+        // Real Zoom shares no longer trip this because ComputeVisibleRegion skips
+        // WS_EX_TRANSPARENT windows at the source.  When this event DOES fire,
+        // it's because WhatsApp is genuinely covered (Spotify, Edge, etc.) and
+        // the overlay must move offscreen to avoid leaking blur on top of the
+        // covering app.
         SetupWhatsAppFound();
         using var sut = CreateSut();
 
-        // Auto-enable on share start — overlay reaches Active state with full visibility.
         _shareDetector.Fire(ScreenShareState.Active, ZoomEvidence());
         Assert.Equal(BlurActivationState.Active, sut.ActivationState);
 
-        // Now Zoom drops overlays on top — the WindowTracker reports VisibleRegion = 0 rects.
         _windowTracker.VisibleRegion.Returns(Array.Empty<Rect>());
         _windowTracker.VisibleRegionChanged += Raise.Event<EventHandler<IReadOnlyList<Rect>>>(
             this, (IReadOnlyList<Rect>)Array.Empty<Rect>());
 
-        // Override kicks in — state stays Active, overlay was NOT moved offscreen by this event.
-        Assert.Equal(BlurActivationState.Active, sut.ActivationState);
+        Assert.Equal(BlurActivationState.Armed, sut.ActivationState);
     }
 
     [Fact]
@@ -321,6 +331,107 @@ public sealed class TrayOrchestratorScreenShareTests
             this, (IReadOnlyList<Rect>)Array.Empty<Rect>());
 
         Assert.Equal(BlurActivationState.Armed, sut.ActivationState);
+    }
+
+    [Fact]
+    public void ShareActive_VisibleRegionDropsToZero_LikelyFullyHidden_OverlayHides()
+    {
+        // v0.3.5 fix: even during an active share, if WhatsApp is genuinely hidden
+        // (Edge fullscreen, virtual desktop switch — IsLikelyFullyHidden=true),
+        // the overlay must move offscreen.  Without this fix, the always-on-top
+        // overlay would paint blurred content on top of the unrelated foreground
+        // app and leak it into the shared stream.
+        SetupWhatsAppFound();
+        using var sut = CreateSut();
+        _shareDetector.Fire(ScreenShareState.Active, ZoomEvidence());
+        Assert.Equal(BlurActivationState.Active, sut.ActivationState);
+
+        _windowTracker.VisibleRegion.Returns(Array.Empty<Rect>());
+        _windowTracker.IsLikelyFullyHidden.Returns(true);
+        _windowTracker.VisibleRegionChanged += Raise.Event<EventHandler<IReadOnlyList<Rect>>>(
+            this, (IReadOnlyList<Rect>)Array.Empty<Rect>());
+
+        Assert.Equal(BlurActivationState.Armed, sut.ActivationState);
+    }
+
+    [Fact]
+    public void ShareActive_NonEmptyRegionButLikelyFullyHidden_OverlayHides()
+    {
+        // The Spotify case: the Z-order walk in ComputeVisibleRegion silently fails
+        // to subtract Spotify's bounds (Chromium-based apps with non-standard
+        // rendering can confuse GetWindowRect-based subtraction), so the rect list
+        // stays "fully visible" while WhatsApp is visually behind Spotify.
+        // WindowFromPoint correctly detects the cover and IsLikelyFullyHidden flips
+        // true.  The orchestrator must hide on this signal alone, not wait for the
+        // (broken) rect-based path to also report empty.
+        SetupWhatsAppFound();
+        using var sut = CreateSut();
+        _shareDetector.Fire(ScreenShareState.Active, ZoomEvidence());
+        Assert.Equal(BlurActivationState.Active, sut.ActivationState);
+
+        var fakeFullRegion = new[] { new Rect(0, 0, 100, 100) };
+        _windowTracker.VisibleRegion.Returns(fakeFullRegion);
+        _windowTracker.IsLikelyFullyHidden.Returns(true);
+        _windowTracker.VisibleRegionChanged += Raise.Event<EventHandler<IReadOnlyList<Rect>>>(
+            this, (IReadOnlyList<Rect>)fakeFullRegion);
+
+        Assert.Equal(BlurActivationState.Armed, sut.ActivationState);
+    }
+
+    [Fact]
+    public void NoShare_NonEmptyRegionButLikelyFullyHidden_OverlayHides()
+    {
+        // Same Spotify scenario, but in manual blur (no share active).  The hide
+        // must still fire — the user explicitly asked that this work in normal
+        // manual-blur cases, not just under share.
+        SetupWhatsAppFound();
+        using var sut = CreateSut();
+        sut.EnableBlur();
+        Assert.Equal(BlurActivationState.Active, sut.ActivationState);
+
+        var fakeFullRegion = new[] { new Rect(0, 0, 100, 100) };
+        _windowTracker.VisibleRegion.Returns(fakeFullRegion);
+        _windowTracker.IsLikelyFullyHidden.Returns(true);
+        _windowTracker.VisibleRegionChanged += Raise.Event<EventHandler<IReadOnlyList<Rect>>>(
+            this, (IReadOnlyList<Rect>)fakeFullRegion);
+
+        Assert.Equal(BlurActivationState.Armed, sut.ActivationState);
+    }
+
+    [Fact]
+    public void ShareActive_PartialOcclusion_AppliesClipToVisibleRegion_NotFullBounds()
+    {
+        // The Spotify-during-share case the user keeps hitting.  Tracker reports
+        // partial visible region (Spotify covers part of WhatsApp); WindowFromPoint
+        // still resolves at uncovered sample points so IsLikelyFullyHidden=false.
+        // The overlay MUST be clipped to the visible-region rects, not the full
+        // WhatsApp bounds — otherwise the always-on-top overlay paints blurred
+        // WhatsApp content on top of Spotify.
+        //
+        // The previous bug: the v0.3.0 share-active override in EffectiveVisibleRegion
+        // returned full bounds for ANY share-active state, ignoring the tracker's
+        // partial-occlusion report.  The new override fires only for the empty-region
+        // false-positive case.
+        SetupWhatsAppFound();
+        using var sut = CreateSut();
+        _shareDetector.Fire(ScreenShareState.Active, ZoomEvidence());
+        Assert.Equal(BlurActivationState.Active, sut.ActivationState);
+        _overlayWindow.ClearReceivedCalls();
+
+        // Spotify covers the right half — tracker reports left half visible.
+        var leftHalf = new[] { new Rect(0, 0, 400, 600) };
+        _windowTracker.VisibleRegion.Returns(leftHalf);
+        _windowTracker.IsLikelyFullyHidden.Returns(false);
+        _windowTracker.VisibleRegionChanged += Raise.Event<EventHandler<IReadOnlyList<Rect>>>(
+            this, (IReadOnlyList<Rect>)leftHalf);
+
+        // The clip MUST be the partial visible rect, NOT cleared (which would mean
+        // "paint everywhere = leak on top of Spotify").
+        _overlayWindow.Received().SetClip(Arg.Is<IReadOnlyList<Rect>>(rects =>
+            rects != null
+            && rects.Count == 1
+            && rects[0].Width == 400
+            && rects[0].Height == 600));
     }
 
     // ── Cold-start repaint nudge ─────────────────────────────────────────────

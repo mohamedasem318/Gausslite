@@ -709,31 +709,28 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
 
         _dispatchToUiThread("OnVisibleRegionChanged", () =>
         {
-            DiagLog.Info($"OnVisibleRegionChanged: applying region ({region.Count} rect(s)) on UI thread");
+            DiagLog.Info($"OnVisibleRegionChanged: applying region ({region.Count} rect(s)) on UI thread, isLikelyFullyHidden={_windowTracker.IsLikelyFullyHidden}");
 
             if (!IsBlurEnabled)
                 return;
 
-            // During an active screen share, the v0.2.0 bounds-based occlusion logic
-            // becomes unreliable: sharing apps (Zoom in particular) drop many small
-            // floating overlays on top of the tracked window — share-control toolbars,
-            // video tiles, layout selectors, annotation panels.  The Z-order subtraction
-            // ends up reporting 0 rects ("fully occluded") even when WhatsApp is mostly
-            // visible and its pixels leak into the shared stream around / through those
-            // overlays.  Privacy-first override: while a share is active, ignore the
-            // fully-occluded report and keep blurring the full window.  Worst case is
-            // some over-blur in regions truly covered by Zoom's UI — viewers see those
-            // regions covered by Zoom anyway, so over-blur there is invisible to them.
-            if (fullyOccluded && !_shareIsActive)
+            // Hide whenever WhatsApp has no visible pixels — share or no share.
+            //   - Tracker reports empty region: no visible pixels (Spotify covers, etc.).
+            //   - IsLikelyFullyHidden via WindowFromPoint: defensive backup for cases
+            //     where the Z-order walk silently missed the cover.
+            //   - Window absent or minimized: no pixels to blur.
+            // Otherwise show the overlay; the clip composition path uses the visible
+            // region's actual rects so the overlay only paints where WhatsApp is
+            // visible (Zoom-share false-positive is no longer a problem because
+            // ComputeVisibleRegion now skips WS_EX_TRANSPARENT windows the same way
+            // WindowFromPoint does).
+            if (fullyOccluded
+                || _windowTracker.IsLikelyFullyHidden
+                || !_windowTracker.IsWindowPresent
+                || _windowTracker.IsMinimized)
             {
                 TransitionToArmed("OnVisibleRegionChanged");
                 HideOverlay("OnVisibleRegionChanged");
-                return;
-            }
-
-            if (!_windowTracker.IsWindowPresent || _windowTracker.IsMinimized)
-            {
-                TransitionToArmed("OnVisibleRegionChanged");
                 return;
             }
 
@@ -780,22 +777,29 @@ public sealed class TrayOrchestrator : ITrayOrchestrator
         ShowOverlay(source);
     }
 
-    // True when the tracker reports a non-empty visible region (i.e. window is not fully occluded).
-    // During an active share, we override "fully occluded" to "fully visible" — see the
-    // OnVisibleRegionChanged comment for the privacy-first rationale.
-    private bool HasVisibleRegion() =>
-        _shareIsActive || (_windowTracker.VisibleRegion?.Count ?? 0) > 0;
+    // True when WhatsApp has any visible pixels.  Single source of truth: the tracker's
+    // visible region.  ComputeVisibleRegion now skips WS_EX_TRANSPARENT windows (matching
+    // WindowFromPoint's own behaviour), so the region is accurate in both the Spotify
+    // case (real opaque cover → empty region → hide) and the Zoom-share case (transparent
+    // overlays don't subtract → region stays full → blur visible).  IsLikelyFullyHidden
+    // is kept as a defensive backup in case some weird app slips past the Z-order walk
+    // entirely.
+    private bool HasVisibleRegion()
+    {
+        if (_windowTracker.IsLikelyFullyHidden) return false;
+        return (_windowTracker.VisibleRegion?.Count ?? 0) > 0;
+    }
 
     // The orchestrator's view of WhatsApp's visible region in screen-DIP coordinates.
-    // Returns the WindowTracker's region by default; during an active share, returns
-    // the full window bounds regardless of z-order so the overlay covers the entire
-    // window (see OnVisibleRegionChanged comment for rationale).
-    private IReadOnlyList<Rect>? EffectiveVisibleRegion()
-    {
-        if (_shareIsActive && _lastKnownBounds.HasValue)
-            return new[] { _lastKnownBounds.Value };
-        return _windowTracker.VisibleRegion;
-    }
+    // Just the tracker's region — no overrides.  The Zoom-share false-positive that
+    // used to motivate an override is now handled at the source: ComputeVisibleRegion
+    // skips WS_EX_TRANSPARENT covering windows so they don't subtract from the visible
+    // region, the same way Win32's WindowFromPoint skips them.  Result: the visible
+    // region accurately reflects "where WhatsApp's pixels are visible to the user" in
+    // both the Zoom-transparent-overlays case (region stays full → blur covers WhatsApp)
+    // and the Spotify-opaque-cover case (region shrinks to the uncovered area or
+    // becomes empty → blur clips or hides).
+    private IReadOnlyList<Rect>? EffectiveVisibleRegion() => _windowTracker.VisibleRegion;
 
     // Computes the scope-aware clip and applies it to the overlay.
     // Reads: _lastKnownBounds, _windowTracker.VisibleRegion, _lastDetectionResult,

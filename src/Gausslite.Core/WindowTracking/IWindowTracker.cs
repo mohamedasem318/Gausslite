@@ -27,6 +27,20 @@ public interface IWindowTracker
     /// </summary>
     IReadOnlyList<Rect>? VisibleRegion { get; }
 
+    /// <summary>
+    /// True when WhatsApp has zero pixels actually visible to the user — i.e. genuinely
+    /// hidden behind another application's window (Edge fullscreen, another fullscreen
+    /// app, virtual-desktop switch, etc.), not just clipped by many small overlays.
+    /// Determined by sampling several points within the tracked window's rect using
+    /// <c>WindowFromPoint</c>, which Windows uses to answer "what window is visually
+    /// on top here?" — it correctly skips <c>WS_EX_TRANSPARENT</c> click-through
+    /// overlays (e.g. Zoom's annotation layer or share-host wrapper during a real share),
+    /// so transparent fullscreen overlays from sharing apps don't cause false positives.
+    /// Used by the orchestrator to gate the share-active overlay-keep-visible override
+    /// so blurred content doesn't leak on top of an unrelated foreground app.
+    /// </summary>
+    bool IsLikelyFullyHidden { get; }
+
     bool IsTracking { get; }
     void SetOverlayWindowHandle(IntPtr hwnd);
     void Start();

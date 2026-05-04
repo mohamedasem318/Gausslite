@@ -151,6 +151,30 @@ any sharing app is running" opt-in toggle. Share-target detection
 (which monitor / window is being captured) deferred to a v0.3.x
 follow-up.
 
+### v0.3.5 — "Minimum settings for beta"
+Carved out of v0.4.0 as the smallest set of capabilities a real beta
+needs. Tray-menu-only surface (no full settings window — that stays in
+v0.4.0). Shipping target: Inno installer + tag + GitHub Release for
+public-but-low-key beta distribution (friends, possibly LinkedIn — no
+big public push yet).
+
+- **Settings persistence** via `%LOCALAPPDATA%\Gausslite\settings.json`.
+  Persists the existing intensity preset and region scope (which
+  currently reset every launch — free win once the layer exists), plus
+  the two new toggles below.
+- **Opt-in "Blur on any sharing app" toggle** (off by default). When on,
+  any visible window owned by `Zoom`, `ms-teams`, or `Discord` triggers
+  blur — the heavy-handed fallback that catches Discord desktop sharing
+  (whose share-control UI is invisible to window enumeration). Browsers
+  are intentionally not in the trigger list (they're always running for
+  most users, defeating the purpose). Implementation extends the
+  existing `WindowSignalScreenShareDetector` with a process-name list
+  read on each poll; flipping the toggle just mutates the list.
+- **"Auto-start with Windows" toggle** (off by default). Writes to
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Gausslite` (per-user
+  hive — no admin elevation required). Reconciled with `Settings.AutoStart`
+  on every launch so registry never silently diverges from intent.
+
 ### v0.4.0 — "Polish"
 - Settings window (opened via tray menu → "Settings..."), separate
   from the tray menu's quick toggles. Tray menu stays as the primary
@@ -160,20 +184,9 @@ follow-up.
   Light/Medium/Heavy presets, or augments them with a custom value)
 - Screen-share client checklist: which sharing apps Gausslite should
   watch for (Zoom, Teams, Meet, Discord, OBS, etc.)
-- **Opt-in "blur whenever any sharing app is running" toggle.** v0.3.0's
-  default is precise: blur turns on only when there's positive evidence
-  of an *active* share (specific share-control window visible). This
-  toggle relaxes that to "if Zoom/Teams/Discord is running at all, blur
-  is on" — a heavy-handed but safe fallback. **Especially relevant for
-  Discord desktop**, whose active-share state is invisible to window
-  enumeration; users who use Discord desktop primarily can flip this
-  on to get coverage at the cost of blur being on whenever Discord is
-  open. Off by default
-- Auto-start with Windows toggle (off by default)
 - Optional "notify when blur is armed" toggle (off by default —
   armed-state silence remains the v0.1.0 default behavior; this
   surfaces it for users who want feedback)
-- Settings persistence (currently nothing persists across launches)
 - Opt-in wall-time forced-repaint timer to close issue #35 (the v0.2.0
   internal-divider-drag-during-static-periods limitation): periodic
   `IWindowTracker.RequestRepaintOfTrackedWindow()` call while blur is
@@ -181,6 +194,9 @@ follow-up.
   default — small steady CPU/battery cost is the tradeoff
 - Updater check (manual link to GitHub Releases for v0; auto-update
   is post-v1)
+- (Settings persistence, "blur on any sharing app", and "auto-start
+  with Windows" all shipped in v0.3.5; v0.4.0 wraps them into the
+  unified settings-window surface and adds the rest of the polish.)
 
 ### v0.5.0 — "Notifications too"
 - Blur incoming WhatsApp toast notifications during screen sharing
@@ -322,8 +338,33 @@ Append-only. One line per decision with date and rationale.
   content but adds polling CPU and complexity disproportionate to the
   use-case priority. Deferred to v0.3.1 follow-up (tracked in
   https://github.com/mohamedasem318/Gausslite/issues/38); users primarily on
-  Discord desktop can flip the v0.4.0 "blur whenever any sharing app is
-  running" toggle when it lands.
+  Discord desktop can flip the v0.3.5 "blur on any sharing app" toggle.
+- 2026-05-03: Carved v0.3.5 "minimum settings for beta" out of v0.4.0.
+  Rationale: shipping the installer immediately after v0.3.0 leaves three
+  high-pain gaps for beta testers (no settings persist across launches,
+  Discord desktop has no detection workaround, and there's no auto-start
+  with Windows). Shipping the full v0.4.0 first would push installer-ready
+  out by 4-6 sessions and design settings UX before any real user feedback
+  exists. v0.3.5 ships the three load-bearing capabilities — persistence,
+  "blur on any sharing app" toggle, auto-start — through the existing
+  tray-menu surface (no full settings window). v0.4.0 then wraps them in a
+  proper settings window plus the rest of the polish list (continuous
+  intensity slider, share-client checklist, armed-state notification,
+  forced-repaint timer, updater) once we know what beta testers actually
+  ask for.
+- 2026-05-03: Settings storage = `%LOCALAPPDATA%\Gausslite\settings.json`.
+  Per-user, no admin elevation needed, survives app reinstallation, follows
+  the standard Windows convention. Format is JSON with camelCase property
+  names and string-encoded enums for human-readability when users send the
+  file with bug reports. Missing/corrupt files silently degrade to defaults
+  (first-run behavior); save failures are logged but never thrown — settings
+  IO must never crash the app.
+- 2026-05-03: "Blur on any sharing app" trigger list is `Zoom`, `ms-teams`,
+  `Discord` — desktop clients only. Browsers (`chrome`, `msedge`) are
+  intentionally excluded: matching on them would mean blur is on whenever
+  a browser is open, which is most of the day for most users — the toggle
+  would be useless. Browser-based shares are still covered by the existing
+  `Chrome_WidgetWin_1 + "is sharing your screen"` window-signature path.
 
 ## Per-session checklist
 
