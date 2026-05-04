@@ -6,6 +6,435 @@
 
 ## Session history
 
+### 2026-05-03 — v0.3.5 minimum settings for beta
+
+**Context.** v0.3.0 has shipped (PR #37) and the security audit landed (PR #42).
+The original sequence was "audit → installer → tag → public push", but on
+reflection there are three gaps that would make a beta release frustrating
+for testers:
+
+1. **Nothing persists across launches.** The user picks intensity Heavy and
+   region scope Conversation; next launch they're back to Medium / Both.
+2. **Discord desktop has no detection workaround.** Issue #38 (Discord
+   share-controls invisible to window enumeration) is real, the proposed UIA
+   fix is non-trivial, and the v0.4.0 "blur whenever any sharing app is
+   running" toggle was the documented escape hatch for users who use Discord
+   primarily. Without that toggle, Discord-desktop users have nothing.
+3. **No auto-start.** Beta testers expect the privacy app they've installed
+   to be running when they sit down at their machine.
+
+The full v0.4.0 polish pass (continuous slider, settings *window*, share-client
+checklist, armed-state notification toggle, repaint timer, updater) is
+4-6 sessions of work and would design those things before having any real
+user feedback. So we carved the three load-bearing items out as v0.3.5,
+ship the installer after this PR, and hold v0.4.0 until first beta feedback.
+
+Distribution plan: low-key beta — friends, possibly LinkedIn. Not Reddit /
+HN. Public GitHub repo, public GitHub Release, but no aggressive promotion.
+
+**Method.** v0.3.5 is wholly incremental — no architectural shifts, no new
+abstractions, just plumbing three settings through the existing tray surface.
+
+---
+
+**Settings persistence layer.**
+
+- `Gausslite.Core.Settings.Settings` — immutable record with init-only
+  properties. Defaults: Intensity=Medium, Scope=Both, AutoStart=false,
+  ProcessRunningHeuristicEnabled=false. `with`-style updates (`_settings with
+  { AutoStart = true }`) keep mutations explicit.
+- `ISettingsStore.Load() / Save(Settings)` — the persistence seam. Lives in
+  Core because consumers are platform-agnostic; implementations live in App
+  because storage location is OS-specific.
+- `JsonSettingsStore` (in `Gausslite.App.Persistence`) writes to
+  `%LOCALAPPDATA%\Gausslite\settings.json`. Per-user, no admin, survives
+  reinstalls. JSON with camelCase property names + `JsonStringEnumConverter`
+  so users sending the file with bug reports can read it. WriteIndented for
+  the same reason.
+- Error handling: missing file / empty file / corrupt JSON / literal `null`
+  all degrade to `new Settings()` defaults via try/catch in `Load`. Save
+  failures return `false` and log via `StartupLog`. Settings IO must never
+  crash the app; first-run-on-corrupt is the worst case and is acceptable.
+
+**Namespace gotcha.** Initially put `JsonSettingsStore` in `Gausslite.App.Settings`
+to mirror the Core namespace. Compiler refused: `Gausslite.App.Settings` is the
+current namespace, so the unqualified token `Settings` resolved to the
+namespace, not the type from `using Gausslite.Core.Settings;`. Renamed the
+App-side folder + namespace to `Persistence` (which better describes the
+concern anyway — App is about *how* settings are persisted, not about *what*
+they are).
+
+7 new tests in `JsonSettingsStoreTests`: defaults on missing file, full
+round-trip, corrupt JSON returns defaults, empty file returns defaults,
+literal "null" returns defaults, partial JSON fills with defaults, parent
+directory auto-created on save. All use a temp-file path via the internal
+ctor so the tests never touch the real `%LOCALAPPDATA%` folder.
+
+---
+
+**Auto-start with Windows.**
+
+- `IAutoStartManager.IsEnabled() / Enable() / Disable()` interface in
+  `Gausslite.App.Persistence`.
+- `RegistryAutoStartManager` writes value `Gausslite` under
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` = `"<full path to
+  current .exe>"`. Per-user hive — no UAC, no admin needed.
+- `IsEnabled()` does an exact case-insensitive match against the current
+  executable path, so a moved or renamed binary reads as "not enabled" and
+  the user can re-toggle to update. This handles the "user reinstalled to a
+  different folder" case without any complex migration logic.
+- `Enable()` is idempotent (overwrites any existing value); `Disable()` is
+  idempotent (no-op if the value isn't there).
+- All registry exceptions caught — failures log via `StartupLog.Warn` and
+  return `false`. The tray menu reverts the visual checkbox if the registry
+  write fails.
+- Reconciliation at startup: in `App.OnStartup`, after loading Settings, if
+  `Settings.AutoStart != autoStart.IsEnabled()`, call `Enable()` or
+  `Disable()` to align. Cheap (one registry read + maybe one write); ensures
+  the registry never silently diverges from the user's stored intent.
+
+No unit test for `RegistryAutoStartManager` — it's nearly pure delegation to
+`Microsoft.Win32.Registry`, and adding a test would mean either touching the
+real `HKCU` (fragile, could leave junk behind) or extracting an
+`IRegistryKey` abstraction just to mock it. The smoke test ("toggle on →
+restart → app is running") covers the path.
+
+---
+
+**"Blur on any sharing app" toggle.**
+
+The tricky decision was whether to write a separate detector or extend the
+existing one. The existing `WindowSignalScreenShareDetector` already
+enumerates all visible windows on each tick — we'd be enumerating twice if
+we ran a separate process-list detector in parallel. So extension wins:
+
+- New static `WindowSignalScreenShareDetector.DefaultTriggerProcessNames`
+  constant: `{ "Zoom", "ms-teams", "Discord" }`. Browsers explicitly
+  excluded; the constant is exported so the tray-menu code uses the same
+  source of truth.
+- New mutable field `_triggerProcessNames` (default empty). Toggle on flips
+  it to `DefaultTriggerProcessNames`; toggle off flips it back to empty.
+  Read once at the top of each `Poll()` so a flip mid-poll can't tear.
+- `Poll()` now has two phases per visible window: phase 1 = strict
+  signature match (highest-quality evidence, never false-positive); phase 2
+  = process-name match against the trigger list (heavy-handed; only
+  consulted when the toggle is on). Phase 1 always wins if both fire on the
+  same window — the signature match produces a more informative AppName
+  ("Zoom") vs the heuristic AppName ("Zoom (process heuristic)").
+- No change to the transition-only event semantics: `StateChanged` still
+  fires only on Idle↔Active transitions.
+
+Trade-off: when the toggle is on, the user pays a process-name string
+comparison loop per visible window per tick. With ~50 visible windows and 3
+trigger names, that's 150 case-insensitive equality checks per second. Free.
+
+7 new detector tests: heuristic-off respects signature only; heuristic-on
+triggers on process match; heuristic-on with no matching process stays
+idle; case-insensitive process matching; signature precedence over process
+match when both apply; mid-session flip-off transitions Active→Idle on next
+poll; default trigger list includes Zoom/Teams/Discord and excludes
+chrome/msedge.
+
+---
+
+**Tray menu wiring.**
+
+`TrayIconHost`'s constructor went from 2 args (`orchestrator, notifier`) to 6
+(`orchestrator, settingsStore, autoStart, detector, initialSettings,
+notifier`). No existing tests break because there are no `TrayIconHost`
+unit tests — it's pure WPF wiring.
+
+Menu layout:
+
+```
+Enable blur            ✓
+Blur intensity         ►
+Blur region            ►
+─────────────
+Auto-start with Windows
+Blur on any sharing app
+─────────────
+Exit
+```
+
+The intensity / scope click handlers also save `Settings` now via
+`PersistSettings(_settings with { Intensity = preset })`. Toggle-with-failure
+handling for auto-start: WPF's checkable `MenuItem` flips `IsChecked` *before*
+the click event fires, so we read the new state, attempt the registry write,
+and revert `IsChecked` if the write failed. Visual stays in sync with reality.
+
+The "Blur on any sharing app" menu item has a tooltip explaining the
+trade-off: "Treats any running Zoom / Teams / Discord desktop as an active
+share. Catches Discord desktop sharing (which is invisible to window
+detection); downside: blur turns on whenever those apps are running."
+
+---
+
+**Composition root changes (`App.xaml.cs`).**
+
+Order of construction now matters because settings drive other components:
+
+1. `JsonSettingsStore` → `settings = settingsStore.Load()`.
+2. `RegistryAutoStartManager` → reconcile with `settings.AutoStart`.
+3. (Existing: D3D11 device, profile, tracker, capture, blur, overlay,
+   region detector.)
+4. `TrayOrchestrator` constructed.
+5. `WindowSignalScreenShareDetector` constructed.
+6. `_orchestrator.SetIntensity(settings.Intensity)` and `SetScope(settings.Scope)`
+   apply persisted values to runtime state.
+7. If `settings.ProcessRunningHeuristicEnabled`, call
+   `screenShareDetector.SetTriggerProcessNames(DefaultTriggerProcessNames)`.
+8. `TrayIconHost(_orchestrator, settingsStore, autoStart, detector, settings, …)`
+   reads everything to build the menu with correct check states.
+
+---
+
+**Tests.** 14 new (7 Core for heuristic, 7 App for JSON store). Total now
+Core 135/135, App 105/105 on x64. Build clean (0 errors, 1 expected Win2D
+AnyCPU warning). `dotnet restore --locked-mode` clean.
+
+---
+
+**Smoke-found bug: overlay leaks on top of unrelated app when WhatsApp is hidden during share.**
+
+Smoke test of the new heuristic toggle exposed a privacy regression. Repro:
+
+1. WhatsApp open and visible.
+2. Toggle "Blur on any sharing app" ON. ms-teams is running (not actually sharing).
+3. Heuristic fires → auto-enable blur. Overlay shows on WhatsApp.
+4. Click another app (Edge, etc.) that fully covers WhatsApp's screen area.
+5. **Bug:** the always-on-top blur overlay stays on screen, painting blurred
+   WhatsApp pixels on top of Edge — and those leaked pixels would be in the
+   shared stream during a real share.
+
+Root cause: the v0.3.0 occlusion-override (`if (fullyOccluded && !_shareIsActive)
+{ hide; }` — "during share, ignore the fully-occluded report") was designed to
+handle Zoom's many small tile overlays stacking and producing a false-positive
+"fully occluded" Z-order subtraction. But it fires for ALL fully-occluded cases
+during share — including legitimate full occlusion (Edge fullscreen, another
+fullscreen app, virtual desktop switch). The override's intended privacy
+benefit (over-blur Zoom-tile-covered areas) becomes an *outward* leak when
+WhatsApp is genuinely hidden behind something else.
+
+Plus: at line 736 of `OnVisibleRegionChanged`, when minimized-during-share, the
+code transitions to Armed state but forgets to call `HideOverlay` — the stale
+blurred frame stays on screen at WhatsApp's last-known coordinates.
+
+**Fix (final, after FIVE iterations — this took embarrassingly long).**
+The first four iterations all added increasingly-clever heuristics in the
+orchestrator to work around a fundamentally wrong visible-region. The fifth
+iteration finally fixed it at the source.
+
+**Root cause:** `ComputeVisibleRegion` walked the Z-order subtracting every
+covering window's `GetWindowRect`, but didn't filter `WS_EX_TRANSPARENT`
+windows. Win32's `WindowFromPoint` skips `WS_EX_TRANSPARENT` (it's the same
+flag our own overlay uses for click-through), and *visually* those windows
+don't block what's beneath them. Zoom drops transparent annotation/share-host
+overlays during a share whose `GetWindowRect` spans the screen; the Z-order
+subtraction wrongly took those as opaque coverage and reported WhatsApp's
+visible region as empty. The v0.3.0 orchestrator override ("during share,
+ignore the empty region") was a workaround for that.
+
+**Final fix:** add `WS_EX_TRANSPARENT` to the same filter that already skips
+`WS_EX_TOOLWINDOW`. Now the visible region matches what `WindowFromPoint`
+sees and what the user sees: Zoom transparent overlays are skipped → region
+stays full → blur covers WhatsApp. Spotify opaque covers are subtracted →
+region shrinks or empties → overlay clips or hides. **No orchestrator
+override needed; removed all of them.**
+
+`EffectiveVisibleRegion()` is now just `_windowTracker.VisibleRegion`.
+`OnVisibleRegionChanged` hides whenever the region is empty OR
+`IsLikelyFullyHidden` OR not-present-or-minimized — no more `_shareIsActive`
+branches. `HasVisibleRegion()` is `IsLikelyFullyHidden ? false : region.Count > 0`.
+
+`IsLikelyFullyHidden` (the `WindowFromPoint` sampling I added in earlier
+iterations) is kept as a defensive backup for the rare case the Z-order
+walk silently misses a covering window entirely (some Chromium-compositor
+apps have non-standard rendering). Primary signal is the visible region;
+this is the safety net.
+
+The first attempt used a *geometric* heuristic: "set the flag when any single
+covering window's `GetWindowRect` fully contains WhatsApp's bounds." That
+seemed reasonable on paper — Edge fullscreen does cover WhatsApp's bounds, a
+single Zoom tile does not. But the second smoke test (real Zoom share) showed
+this re-introduced the original v0.3.0 bug: during a Zoom share Zoom drops
+multiple `WS_EX_TRANSPARENT` overlays (the annotation layer, the share-host
+wrapper, etc.) whose `GetWindowRect` spans the entire monitor. Geometrically
+those *do* fully contain WhatsApp; visually they're click-through. The flag
+flipped true and the overlay stayed parked offscreen for the entire share.
+
+Switched to `WindowFromPoint` sampling. `WindowFromPoint` is Win32's
+authoritative "what window is visually on top here?" — and it automatically
+skips `WS_EX_TRANSPARENT` windows (this is what `IsHitTestVisible=false`
+ultimately maps to). Sample 5 points inside WhatsApp's rect (4 inset corners
++ center). If any sample resolves to a window owned by WhatsApp's process,
+WhatsApp has at least some pixels visible to viewers — treat it as not fully
+hidden. If none do, WhatsApp is genuinely behind a fullscreen non-transparent
+window — hide the overlay.
+
+This works correctly for all three real-world cases:
+
+- **Edge fullscreen** (every sample returns Edge): `IsLikelyFullyHidden = true`
+  → overlay hides. ✓
+- **WhatsApp minimized** (window is at -32000, samples are off-screen,
+  WindowFromPoint returns IntPtr.Zero or another window):
+  `IsLikelyFullyHidden = true` → overlay hides. ✓ (also caught by IsMinimized
+  check.)
+- **Zoom-during-share with transparent overlays + small tiles** (samples
+  pass through transparent overlays and resolve to WhatsApp):
+  `IsLikelyFullyHidden = false` → override keeps overlay visible. ✓
+
+Implementation:
+
+- `WindowTracker.ComputeVisibleRegion` returns `(visibleRects, likelyFullyHidden)`
+  tuple. Z-order subtraction logic unchanged. The flag is computed afterward
+  via `AnySamplePointResolvesToWhatsApp` which calls `WindowFromPoint` for 5
+  inset/center points and checks if any resolves to WhatsApp's root.
+- `WindowTracker.PollLoop` writes `IsLikelyFullyHidden` on every sample, and
+  fires `VisibleRegionChanged` on its transitions even if the rect list itself
+  didn't change. (Third-iteration fix — see "Spotify case" below.)
+- `IWindowTracker.IsLikelyFullyHidden` exposed as a property.
+- `TrayOrchestrator.OnVisibleRegionChanged` hides whenever
+  `_windowTracker.IsLikelyFullyHidden` is true, regardless of share state or
+  rect count. The v0.3.0 share-active "ignore fully-occluded" override is
+  removed — `WindowFromPoint` handles the Zoom transparent-overlay case
+  correctly by construction (transparent overlays are skipped, sample resolves
+  to WhatsApp, flag stays false). Also fixed the missing `HideOverlay` at the
+  minimize-during-share path (orig line 736).
+- `TrayOrchestrator.HasVisibleRegion` returns false whenever
+  `IsLikelyFullyHidden` is true, so the rest of the orchestration pipeline
+  (clip composition, `ApplyVisibilityForCurrentWindow`) sees consistent state.
+
+**Third iteration: the Spotify case (variant 1, full cover).**  Second smoke
+test exposed yet another case: with Zoom share active and Spotify opened to
+cover WhatsApp, the overlay stayed on top covering Spotify.  The log showed
+*zero* `VisibleRegionChanged` events for ~20 seconds while Spotify was
+covering — the Z-order walk in `ComputeVisibleRegion` silently failed to
+subtract Spotify's bounds (Chromium-based apps with compositor-mediated
+rendering can confuse `GetWindowRect`-based subtraction).  Two changes:
+
+1. `WindowTracker` fires `VisibleRegionChanged` whenever `IsLikelyFullyHidden`
+   transitions, not only when the rect list changes.
+2. `TrayOrchestrator.OnVisibleRegionChanged` hides whenever
+   `IsLikelyFullyHidden` is true at the top of the handler.
+
+**Fourth iteration: the Spotify case (variant 2, PARTIAL cover) — the real
+underlying bug all along.**  Third smoke test, third Spotify report.  The
+log showed:
+
+```
+visible region changed to 1 rect(s) (likelyFullyHidden=False)
+OnVisibleRegionChanged: applying region (1 rect(s))
+clip-compose bounds=192,217,1316,818 ... captureRect=(none) scopeRect=(none)
+OverlayWindow.SetClip: clip cleared
+OnVisibleRegionChanged: full visibility, no scope — clip cleared
+```
+
+This time the Z-order walk DID see Spotify — visible region went to a single
+rect representing the uncovered area.  `IsLikelyFullyHidden` correctly stayed
+false (samples in uncovered area resolved to WhatsApp).  Orchestrator
+correctly didn't hide.  But then `RecomputeAndApplyClip` *cleared the clip*
+and reported "full visibility".  The overlay then painted across the entire
+WhatsApp area, including over Spotify.
+
+Root cause: `EffectiveVisibleRegion()` had the v0.3.0 share-active override
+firing for ALL share-active states:
+
+```csharp
+// OLD (wrong):
+if (_shareIsActive && !_windowTracker.IsLikelyFullyHidden && _lastKnownBounds.HasValue)
+    return new[] { _lastKnownBounds.Value };
+return _windowTracker.VisibleRegion;
+```
+
+Designed for the Zoom-tile false-positive case where the tracker's *empty*
+region was wrong.  But it discards the tracker's region unconditionally
+during share — including legitimate partial-occlusion reports like "Spotify
+covers half of WhatsApp."  The clip composition then sees full bounds,
+optimises to "no clip," and the overlay paints everywhere.
+
+Fix: override only the empty-region case.
+
+```csharp
+// NEW:
+var trackerRegion = _windowTracker.VisibleRegion;
+bool emptyRegion = trackerRegion is null || trackerRegion.Count == 0;
+if (emptyRegion
+    && _shareIsActive
+    && !_windowTracker.IsLikelyFullyHidden
+    && _lastKnownBounds.HasValue)
+{
+    return new[] { _lastKnownBounds.Value };  // Zoom-tile false-positive only
+}
+return trackerRegion;
+```
+
+Now: tracker reports `[1 rect]` for the Spotify case → that rect goes through
+unchanged → `SetClip` receives it → overlay only paints in the uncovered area
+→ Spotify shows through clean.  Same logic in non-share manual blur (which
+the user explicitly required works).  Aligned `HasVisibleRegion()` with the
+same priority.
+
+Tests for THIS iteration:
+- `ShareActive_NonEmptyRegionButLikelyFullyHidden_OverlayHides` (3rd-iter)
+- `NoShare_NonEmptyRegionButLikelyFullyHidden_OverlayHides` (3rd-iter)
+- `ShareActive_PartialOcclusion_AppliesClipToVisibleRegion_NotFullBounds`
+  (4th-iter — locks down "tracker partial region must reach SetClip during
+  share, not get discarded")
+- `ManualBlur_PartialOcclusion_AppliesClipToVisibleRegion` (4th-iter — same
+  for manual blur, the user's "even in normal manual cases" requirement)
+
+Bonus fix: `WindowTracker.Stop()` now waits for the poll task to drain (1 s
+timeout) before clearing observable state. Previously it cancelled the CTS
+and returned immediately, which let the poll thread fire one more event after
+the caller had already started reading event-list state — causing a
+pre-existing `Collection was modified during enumeration` flake in
+`WindowTrackerMinimizedTests` that the timing shift in this PR exposed
+reliably.
+
+4 new Core tests in `WindowTrackerTests` (no-covering → false, partial-cover
+→ false, full-cover-by-opaque → true, transparent-fullscreen-overlay → false
+locks down the v3 regression that bit the geometric heuristic). 5 new App
+tests in `TrayOrchestrator*Tests` covering the v3 hide path (Edge / Spotify
+full cover, share + manual) and the v4 clip path (Spotify partial cover,
+share + manual).  Existing 16 `TrayOrchestratorScreenShareTests` all still
+pass.
+
+Bumped two timing-sensitive `WindowTrackerTests`/`WindowTrackerMinimizedTests`
+delays from 60 ms → 150 ms; the extra `WindowFromPoint` work per poll made
+them flake under thread-pool contention with the suite running concurrently.
+
+Final test count: Core 139/139, App 110/110. (Was 135 + 105 before this fix.)
+
+---
+
+**Files modified:**
+- New: `src/Gausslite.Core/Settings/Settings.cs`,
+  `src/Gausslite.Core/Settings/ISettingsStore.cs`.
+- New: `src/Gausslite.App/Persistence/JsonSettingsStore.cs`,
+  `IAutoStartManager.cs`, `RegistryAutoStartManager.cs`.
+- Modified: `src/Gausslite.Core/ScreenShare/WindowSignalScreenShareDetector.cs`
+  (process-name heuristic phase 2).
+- Modified: `src/Gausslite.App/Tray/TrayIconHost.cs` (constructor expansion +
+  two new menu items).
+- Modified: `src/Gausslite.App/App.xaml.cs` (composition root).
+- New: `tests/Gausslite.App.Tests/Persistence/JsonSettingsStoreTests.cs`.
+- Modified: `tests/Gausslite.Core.Tests/ScreenShare/WindowSignalScreenShareDetectorTests.cs`
+  (7 new heuristic tests).
+- Modified: `src/Gausslite.Core/WindowTracking/IWindowTracker.cs` (new
+  `IsLikelyFullyHidden` property).
+- Modified: `src/Gausslite.Core/WindowTracking/WindowTracker.cs`
+  (`ComputeVisibleRegion` returns tuple with flag; `Stop()` awaits poll task).
+- Modified: `src/Gausslite.App/Orchestration/TrayOrchestrator.cs` (gated
+  occlusion override; missing `HideOverlay` at minimize-during-share path).
+- Modified: `tests/Gausslite.Core.Tests/WindowTracking/WindowTrackerTests.cs`
+  (destructure new tuple return; 3 new tests for the flag).
+- Modified: `tests/Gausslite.App.Tests/TrayOrchestratorScreenShareTests.cs`
+  (1 new test locking down the bug fix).
+- Modified: `PLAN.md`, `STATE.md`, `HISTORY.md`, `CHANGELOG.md`.
+
+---
+
 ### 2026-05-03 — Pre-public-release security audit + privacy hardening
 
 **Context.** v0.3.0 first slice ("auto-blur on active screen share detection")

@@ -40,15 +40,15 @@ public sealed class WindowTrackerMinimizedTests : IDisposable
         _tracker.BoundsChanged += (_, bounds) => _boundsEvents.Add(bounds);
 
         _tracker.Start();
-        await Task.Delay(60);
+        await Task.Delay(150);
 
         currentRect = new RECT { Left = -32000, Top = -32000, Right = -31840, Bottom = -31910 };
         isMinimized = true;
-        await Task.Delay(60);
+        await Task.Delay(150);
 
         currentRect = restoredRect;
         isMinimized = false;
-        await Task.Delay(80);
+        await Task.Delay(200);
 
         _tracker.Stop();
 

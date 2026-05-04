@@ -199,4 +199,152 @@ public sealed class WindowSignalScreenShareDetectorTests
         sut.Dispose();
         Assert.Throws<ObjectDisposedException>(() => sut.Start());
     }
+
+    // ── Process-running heuristic (toggle-driven) ───────────────────────────
+
+    [Fact]
+    public void Heuristic_DefaultDisabled_ProcessNameAloneDoesNotMatch()
+    {
+        // No window matches the signature; one window has process name "Discord".
+        // With the heuristic OFF (default), this must NOT trigger Active.
+        _win32.EnumerateVisibleWindows().Returns(new[]
+        {
+            Window("ChatWindowClass", proc: "Discord"),
+            Window("OtherClass",      proc: "explorer"),
+        });
+
+        using var sut = CreateSut();
+        var events = new List<ScreenShareState>();
+        sut.StateChanged += (_, s) => events.Add(s);
+
+        sut.Start();
+        FireTick();
+
+        Assert.Equal(ScreenShareState.Idle, sut.CurrentState);
+        Assert.Empty(events);
+    }
+
+    [Fact]
+    public void Heuristic_Enabled_AnyWindowOwnedByTriggerProcess_TransitionsToActive()
+    {
+        _win32.EnumerateVisibleWindows().Returns(new[]
+        {
+            Window("ChatWindowClass", proc: "Discord"),
+            Window("OtherClass",      proc: "explorer"),
+        });
+
+        using var sut = CreateSut();
+        sut.SetTriggerProcessNames(new[] { "Discord", "Zoom", "ms-teams" });
+
+        var events = new List<ScreenShareState>();
+        sut.StateChanged += (_, s) => events.Add(s);
+
+        sut.Start();
+        FireTick();
+
+        Assert.Equal(ScreenShareState.Active, sut.CurrentState);
+        Assert.Single(events);
+        Assert.NotNull(sut.CurrentEvidence);
+        Assert.Contains("Discord", sut.CurrentEvidence!.Value.AppName);
+        Assert.Contains("heuristic", sut.CurrentEvidence.Value.AppName, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Heuristic_Enabled_NoWindowOwnedByTriggerProcess_StaysIdle()
+    {
+        _win32.EnumerateVisibleWindows().Returns(new[]
+        {
+            Window("OtherClass", proc: "explorer"),
+            Window("Notepad",    proc: "notepad"),
+        });
+
+        using var sut = CreateSut();
+        sut.SetTriggerProcessNames(new[] { "Discord", "Zoom", "ms-teams" });
+
+        var events = new List<ScreenShareState>();
+        sut.StateChanged += (_, s) => events.Add(s);
+
+        sut.Start();
+        FireTick();
+
+        Assert.Equal(ScreenShareState.Idle, sut.CurrentState);
+        Assert.Empty(events);
+    }
+
+    [Fact]
+    public void Heuristic_ProcessMatchIsCaseInsensitive()
+    {
+        _win32.EnumerateVisibleWindows().Returns(new[]
+        {
+            Window("MainWindow", proc: "discord"), // lowercase
+        });
+
+        using var sut = CreateSut();
+        sut.SetTriggerProcessNames(new[] { "Discord" }); // capitalized
+
+        sut.Start();
+        FireTick();
+
+        Assert.Equal(ScreenShareState.Active, sut.CurrentState);
+    }
+
+    [Fact]
+    public void Heuristic_SignatureMatchTakesPrecedenceOverProcessMatch()
+    {
+        // Both phases fire; the signature-based AppName should win because
+        // it's higher-quality evidence.
+        _win32.EnumerateVisibleWindows().Returns(new[]
+        {
+            Window("FakeShareToolbar", title: "Sharing controls", proc: "Zoom"),
+        });
+
+        using var sut = CreateSut();
+        sut.SetTriggerProcessNames(new[] { "Zoom" });
+
+        sut.Start();
+        FireTick();
+
+        Assert.Equal(ScreenShareState.Active, sut.CurrentState);
+        Assert.Equal("FakeApp", sut.CurrentEvidence!.Value.AppName); // from FakeSignature
+    }
+
+    [Fact]
+    public void Heuristic_FlippedOffMidSession_NextPollClearsState()
+    {
+        var calls = 0;
+        _win32.EnumerateVisibleWindows().Returns(_ =>
+        {
+            calls++;
+            return new[] { Window("ChatWindowClass", proc: "Discord") };
+        });
+
+        using var sut = CreateSut();
+        sut.SetTriggerProcessNames(new[] { "Discord" });
+
+        var events = new List<ScreenShareState>();
+        sut.StateChanged += (_, s) => events.Add(s);
+
+        sut.Start();
+        FireTick(); // Active (heuristic)
+
+        sut.SetTriggerProcessNames(Array.Empty<string>()); // toggle OFF
+        FireTick(); // should transition back to Idle
+
+        Assert.Equal(ScreenShareState.Idle, sut.CurrentState);
+        Assert.Equal(2, events.Count);
+        Assert.Equal(ScreenShareState.Active, events[0]);
+        Assert.Equal(ScreenShareState.Idle, events[1]);
+    }
+
+    [Fact]
+    public void DefaultTriggerProcessNames_IncludesZoomTeamsDiscord_NoBrowsers()
+    {
+        var defaults = WindowSignalScreenShareDetector.DefaultTriggerProcessNames;
+
+        Assert.Contains("Zoom", defaults);
+        Assert.Contains("ms-teams", defaults);
+        Assert.Contains("Discord", defaults);
+        Assert.DoesNotContain("chrome", defaults);
+        Assert.DoesNotContain("msedge", defaults);
+    }
 }

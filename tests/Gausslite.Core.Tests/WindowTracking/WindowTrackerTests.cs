@@ -181,7 +181,7 @@ public sealed class WindowTrackerTests : IDisposable
         _win32.GetRootWindow(whatsapp).Returns(whatsapp);
         _win32.GetPreviousWindow(whatsapp).Returns(IntPtr.Zero); // nothing above
 
-        var region = WindowTracker.ComputeVisibleRegion(rect, whatsapp, IntPtr.Zero, _win32);
+        var (region, _) = WindowTracker.ComputeVisibleRegion(rect, whatsapp, IntPtr.Zero, _win32);
 
         Assert.Single(region);
         Assert.Equal(rect.Left,   region[0].Left);
@@ -206,7 +206,7 @@ public sealed class WindowTrackerTests : IDisposable
         _win32.GetWindowRect(chrome, out dummy)
               .Returns(x => { x[1] = rect; return true; }); // covers exactly
 
-        var region = WindowTracker.ComputeVisibleRegion(rect, whatsapp, IntPtr.Zero, _win32);
+        var (region, _) = WindowTracker.ComputeVisibleRegion(rect, whatsapp, IntPtr.Zero, _win32);
 
         Assert.Empty(region);
     }
@@ -228,7 +228,7 @@ public sealed class WindowTrackerTests : IDisposable
         _win32.GetWindowRect(chrome, out dummy)
               .Returns(x => { x[1] = coveringRect; return true; });
 
-        var region = WindowTracker.ComputeVisibleRegion(whatsappRect, whatsapp, IntPtr.Zero, _win32);
+        var (region, _) = WindowTracker.ComputeVisibleRegion(whatsappRect, whatsapp, IntPtr.Zero, _win32);
 
         // Visible: left half (0,0,50,100)
         Assert.Single(region);
@@ -255,7 +255,7 @@ public sealed class WindowTrackerTests : IDisposable
         _win32.GetWindowRect(chrome, out dummy)
               .Returns(x => { x[1] = coveringRect; return true; });
 
-        var region = WindowTracker.ComputeVisibleRegion(whatsappRect, whatsapp, IntPtr.Zero, _win32);
+        var (region, _) = WindowTracker.ComputeVisibleRegion(whatsappRect, whatsapp, IntPtr.Zero, _win32);
 
         // L-shape: bottom band (0,50,100,100) + top-left (0,0,50,50)
         Assert.Equal(2, region.Count);
@@ -275,7 +275,7 @@ public sealed class WindowTrackerTests : IDisposable
         _win32.GetPreviousWindow(whatsapp).Returns(overlay); // overlay is directly above
         _win32.GetPreviousWindow(overlay).Returns(IntPtr.Zero);
 
-        var region = WindowTracker.ComputeVisibleRegion(rect, whatsapp, overlay, _win32);
+        var (region, _) = WindowTracker.ComputeVisibleRegion(rect, whatsapp, overlay, _win32);
 
         // Overlay should be skipped — full region visible
         Assert.Single(region);
@@ -294,7 +294,7 @@ public sealed class WindowTrackerTests : IDisposable
         _win32.IsWindowVisible(chrome).Returns(true);
         _win32.IsIconic(chrome).Returns(true); // minimized → should be skipped
 
-        var region = WindowTracker.ComputeVisibleRegion(rect, whatsapp, IntPtr.Zero, _win32);
+        var (region, _) = WindowTracker.ComputeVisibleRegion(rect, whatsapp, IntPtr.Zero, _win32);
 
         Assert.Single(region); // still fully visible
     }
@@ -311,7 +311,7 @@ public sealed class WindowTrackerTests : IDisposable
         _win32.GetPreviousWindow(chrome).Returns(IntPtr.Zero);
         _win32.IsWindowVisible(chrome).Returns(false); // invisible → should be skipped
 
-        var region = WindowTracker.ComputeVisibleRegion(rect, whatsapp, IntPtr.Zero, _win32);
+        var (region, _) = WindowTracker.ComputeVisibleRegion(rect, whatsapp, IntPtr.Zero, _win32);
 
         Assert.Single(region); // still fully visible
     }
@@ -336,9 +336,40 @@ public sealed class WindowTrackerTests : IDisposable
         _win32.GetWindowRect(internalHwnd, out dummy)
               .Returns(x => { x[1] = rect; return true; }); // fully covers
 
-        var region = WindowTracker.ComputeVisibleRegion(rect, whatsapp, IntPtr.Zero, _win32);
+        var (region, _) = WindowTracker.ComputeVisibleRegion(rect, whatsapp, IntPtr.Zero, _win32);
 
         Assert.Single(region); // internal HWND skipped → still fully visible
+    }
+
+    [Fact]
+    public void ComputeVisibleRegion_SkipsTransparentClickThroughCoveringWindows()
+    {
+        // The Zoom-during-share case at the source: a WS_EX_TRANSPARENT covering window
+        // (Zoom annotation overlay, share-host wrapper, etc.) sits above WhatsApp with
+        // bounds spanning the screen.  WindowFromPoint already skips these (they're
+        // visually click-through), so the Z-order subtraction must skip them too —
+        // otherwise the visible region falsely reports zero and the orchestrator would
+        // hide the overlay during a real share.
+        const int WS_EX_TRANSPARENT = 0x20;
+        var whatsapp = new IntPtr(10);
+        var transparentOverlay = new IntPtr(20);
+        var rect = new RECT { Left = 0, Top = 0, Right = 100, Bottom = 100 };
+
+        _win32.GetRootWindow(whatsapp).Returns(whatsapp);
+        _win32.GetPreviousWindow(whatsapp).Returns(transparentOverlay);
+        _win32.GetPreviousWindow(transparentOverlay).Returns(IntPtr.Zero);
+        _win32.GetWindowProcessId(whatsapp).Returns(1u);
+        _win32.GetWindowProcessId(transparentOverlay).Returns(2u);
+        _win32.GetWindowExStyle(transparentOverlay).Returns(WS_EX_TRANSPARENT);
+        _win32.IsWindowVisible(transparentOverlay).Returns(true);
+        _win32.IsIconic(transparentOverlay).Returns(false);
+        RECT dummy = default;
+        _win32.GetWindowRect(transparentOverlay, out dummy)
+              .Returns(x => { x[1] = rect; return true; });
+
+        var (region, _) = WindowTracker.ComputeVisibleRegion(rect, whatsapp, IntPtr.Zero, _win32);
+
+        Assert.Single(region); // transparent covering skipped → still fully visible
     }
 
     [Fact]
@@ -362,9 +393,130 @@ public sealed class WindowTrackerTests : IDisposable
         _win32.GetWindowRect(taskbarStrip, out dummy)
               .Returns(x => { x[1] = rect; return true; }); // fully covers
 
-        var region = WindowTracker.ComputeVisibleRegion(rect, whatsapp, IntPtr.Zero, _win32);
+        var (region, _) = WindowTracker.ComputeVisibleRegion(rect, whatsapp, IntPtr.Zero, _win32);
 
         Assert.Single(region); // toolwindow skipped → still fully visible
+    }
+
+    // ── IsLikelyFullyHidden detection (used to gate the share-active overlay override) ──
+    //
+    // The signal is computed via WindowFromPoint sampling — Win32's authoritative
+    // "what window is visually on top here?" — which automatically skips
+    // WS_EX_TRANSPARENT click-through overlays.  These tests pin the property:
+    // any sample point resolving to WhatsApp's root → !likelyFullyHidden.
+
+    [Fact]
+    public void ComputeVisibleRegion_FullCoverByOpaqueWindow_SetsLikelyFullyHidden()
+    {
+        // Edge fullscreen / another fullscreen app: WindowFromPoint at every sampled
+        // point returns the covering window, not WhatsApp.  Should report
+        // likelyFullyHidden=true so the orchestrator hides the overlay during share.
+        var whatsapp = new IntPtr(10);
+        var edge     = new IntPtr(20);
+        var whatsappRect = new RECT { Left = 50, Top = 50, Right = 150, Bottom = 150 };
+
+        _win32.GetRootWindow(whatsapp).Returns(whatsapp);
+        _win32.GetRootWindow(edge).Returns(edge);
+        _win32.GetPreviousWindow(whatsapp).Returns(edge);
+        _win32.GetPreviousWindow(edge).Returns(IntPtr.Zero);
+        _win32.IsWindowVisible(edge).Returns(true);
+        _win32.IsIconic(edge).Returns(false);
+        RECT dummy = default;
+        _win32.GetWindowRect(edge, out dummy)
+              .Returns(x => { x[1] = whatsappRect; return true; });
+        // Edge wins WindowFromPoint at every sample.
+        _win32.WindowFromPoint(Arg.Any<POINT>()).Returns(edge);
+
+        var (region, likelyFullyHidden) =
+            WindowTracker.ComputeVisibleRegion(whatsappRect, whatsapp, IntPtr.Zero, _win32);
+
+        Assert.Empty(region);
+        Assert.True(likelyFullyHidden);
+    }
+
+    [Fact]
+    public void ComputeVisibleRegion_NoCovering_LikelyFullyHiddenIsFalse()
+    {
+        // Nothing above WhatsApp — every sample resolves to WhatsApp.
+        var whatsapp = new IntPtr(10);
+        var rect = new RECT { Left = 0, Top = 0, Right = 100, Bottom = 100 };
+
+        _win32.GetRootWindow(whatsapp).Returns(whatsapp);
+        _win32.GetPreviousWindow(whatsapp).Returns(IntPtr.Zero);
+        _win32.WindowFromPoint(Arg.Any<POINT>()).Returns(whatsapp);
+
+        var (region, likelyFullyHidden) =
+            WindowTracker.ComputeVisibleRegion(rect, whatsapp, IntPtr.Zero, _win32);
+
+        Assert.Single(region);
+        Assert.False(likelyFullyHidden);
+    }
+
+    [Fact]
+    public void ComputeVisibleRegion_PartialCoverByOneWindow_LikelyFullyHiddenIsFalse()
+    {
+        // Right half covered by chrome; left-corner samples still resolve to WhatsApp.
+        var whatsapp = new IntPtr(10);
+        var chrome   = new IntPtr(20);
+        var whatsappRect = new RECT { Left = 0,  Top = 0, Right = 100, Bottom = 100 };
+        var coveringRect = new RECT { Left = 50, Top = 0, Right = 100, Bottom = 100 };
+
+        _win32.GetRootWindow(whatsapp).Returns(whatsapp);
+        _win32.GetRootWindow(chrome).Returns(chrome);
+        _win32.GetPreviousWindow(whatsapp).Returns(chrome);
+        _win32.GetPreviousWindow(chrome).Returns(IntPtr.Zero);
+        _win32.IsWindowVisible(chrome).Returns(true);
+        _win32.IsIconic(chrome).Returns(false);
+        RECT dummy = default;
+        _win32.GetWindowRect(chrome, out dummy)
+              .Returns(x => { x[1] = coveringRect; return true; });
+        // WindowFromPoint: chrome wins on the right half (X >= 50), WhatsApp on the left.
+        _win32.WindowFromPoint(Arg.Any<POINT>())
+              .Returns(call =>
+              {
+                  var p = (POINT)call[0];
+                  return p.X >= 50 ? chrome : whatsapp;
+              });
+
+        var (region, likelyFullyHidden) =
+            WindowTracker.ComputeVisibleRegion(whatsappRect, whatsapp, IntPtr.Zero, _win32);
+
+        Assert.Single(region);                  // left half still visible
+        Assert.False(likelyFullyHidden);        // left samples resolve to WhatsApp
+    }
+
+    [Fact]
+    public void ComputeVisibleRegion_TransparentFullscreenOverlay_DoesNotSetLikelyFullyHidden()
+    {
+        // The Zoom-during-share repro: an overlay window with bounds spanning the
+        // entire monitor sits above WhatsApp in Z-order, but it's WS_EX_TRANSPARENT
+        // (click-through, doesn't visually block).  WindowFromPoint correctly skips
+        // it and returns WhatsApp; the geometric "fully contains" old heuristic would
+        // have falsely triggered hiding.
+        var whatsapp = new IntPtr(10);
+        var transparentOverlay = new IntPtr(33);
+        var whatsappRect = new RECT { Left = 100, Top = 100, Right = 300, Bottom = 300 };
+        var fullscreenRect = new RECT { Left = 0, Top = 0, Right = 1920, Bottom = 1080 };
+
+        _win32.GetRootWindow(whatsapp).Returns(whatsapp);
+        _win32.GetRootWindow(transparentOverlay).Returns(transparentOverlay);
+        _win32.GetPreviousWindow(whatsapp).Returns(transparentOverlay);
+        _win32.GetPreviousWindow(transparentOverlay).Returns(IntPtr.Zero);
+        _win32.IsWindowVisible(transparentOverlay).Returns(true);
+        _win32.IsIconic(transparentOverlay).Returns(false);
+        RECT dummy = default;
+        _win32.GetWindowRect(transparentOverlay, out dummy)
+              .Returns(x => { x[1] = fullscreenRect; return true; });
+        // WindowFromPoint skips WS_EX_TRANSPARENT — returns WhatsApp at every sample.
+        _win32.WindowFromPoint(Arg.Any<POINT>()).Returns(whatsapp);
+
+        var (region, likelyFullyHidden) =
+            WindowTracker.ComputeVisibleRegion(whatsappRect, whatsapp, IntPtr.Zero, _win32);
+
+        // Z-order subtraction may still fully occlude geometrically (transparent overlay's
+        // GetWindowRect covers WhatsApp), but WindowFromPoint shows WhatsApp is visually
+        // on top, so likelyFullyHidden remains false.
+        Assert.False(likelyFullyHidden);
     }
 
     [Fact]
@@ -393,13 +545,13 @@ public sealed class WindowTrackerTests : IDisposable
         _tracker.VisibleRegionChanged += (_, r) => regionEvents.Add(r);
 
         _tracker.Start();
-        await Task.Delay(60); // sees full region
+        await Task.Delay(150); // sees full region
 
         topAbove = chrome; // chrome now above WhatsApp
-        await Task.Delay(60); // sees empty region → fires
+        await Task.Delay(150); // sees empty region → fires
 
         topAbove = IntPtr.Zero; // chrome gone
-        await Task.Delay(60); // sees full region again → fires
+        await Task.Delay(150); // sees full region again → fires
 
         _tracker.Stop();
 

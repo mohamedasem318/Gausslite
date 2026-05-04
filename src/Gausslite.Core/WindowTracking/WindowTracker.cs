@@ -18,6 +18,7 @@ public sealed class WindowTracker : IWindowTracker, IDisposable
     private bool _lastMinimized;
     private IReadOnlyList<Rect>? _lastVisibleRegion;
     private bool _lastWindowPresent;
+    private bool _lastLikelyFullyHidden;
     private IntPtr _overlayWindowHandle;
 
     // Diagnostic state — written from poll thread only (no locking needed).
@@ -34,6 +35,7 @@ public sealed class WindowTracker : IWindowTracker, IDisposable
     public bool IsWindowPresent { get; private set; }
     public bool IsMinimized { get; private set; }
     public IReadOnlyList<Rect>? VisibleRegion { get; private set; }
+    public bool IsLikelyFullyHidden { get; private set; }
     public bool IsTracking { get; private set; }
 
     public WindowTracker(IWin32Api win32, IAppProfile profile, TimeSpan? pollInterval = null)
@@ -69,14 +71,22 @@ public sealed class WindowTracker : IWindowTracker, IDisposable
         if (!IsTracking) return;
         IsTracking = false;
         _cts?.Cancel();
+        // Wait for the poll loop to observe the cancellation and exit before clearing
+        // observable state, so callers asserting on event lists right after Stop() don't
+        // see one more late event landing mid-assertion.
+        try { _pollTask?.Wait(TimeSpan.FromSeconds(1)); }
+        catch (AggregateException) { /* OperationCanceledException is expected */ }
+        _pollTask = null;
         _lastKnownBounds = null;
         _lastWindowPresent = false;
         _lastMinimized = false;
         _lastVisibleRegion = null;
+        _lastLikelyFullyHidden = false;
         CurrentBounds = null;
         IsWindowPresent = false;
         IsMinimized = false;
         VisibleRegion = null;
+        IsLikelyFullyHidden = false;
     }
 
     private async Task PollLoop(CancellationToken ct)
@@ -117,15 +127,30 @@ public sealed class WindowTracker : IWindowTracker, IDisposable
                 _lastVisibleRegion = newRegion;
                 VisibleRegion = newRegion;
 
+                // IsLikelyFullyHidden updates on every sample.  We also fire a
+                // VisibleRegionChanged event when this flag transitions, even if the
+                // rect list itself didn't change.  Reason: for some apps (Spotify is
+                // a known case — Chromium-based, uses non-standard rendering through a
+                // compositor wrapper), the Z-order walk silently fails to subtract
+                // the covering window's bounds, so the rect list stays "fully visible"
+                // while WhatsApp is visually behind Spotify.  WindowFromPoint correctly
+                // detects this via IsLikelyFullyHidden, but if we only fire the event
+                // on rect changes the orchestrator never re-evaluates and the overlay
+                // stays on top of Spotify leaking blurred content.  Treating the flag
+                // transition as a "visibility changed" signal closes that loop.
+                var likelyFullyHiddenChanged = sample.Value.LikelyFullyHidden != _lastLikelyFullyHidden;
+                _lastLikelyFullyHidden = sample.Value.LikelyFullyHidden;
+                IsLikelyFullyHidden = sample.Value.LikelyFullyHidden;
+
                 if (minimizedChanged)
                 {
                     DiagLog.Info($"WindowTracker: minimized changed to {_lastMinimized}, HWND=0x{sample.Value.Hwnd:X}");
                     MinimizedChanged?.Invoke(this, _lastMinimized);
                 }
 
-                if (regionChanged)
+                if (regionChanged || likelyFullyHiddenChanged)
                 {
-                    DiagLog.Info($"WindowTracker: visible region changed to {newRegion.Count} rect(s), HWND=0x{sample.Value.Hwnd:X}");
+                    DiagLog.Info($"WindowTracker: visible region changed to {newRegion.Count} rect(s) (likelyFullyHidden={IsLikelyFullyHidden}), HWND=0x{sample.Value.Hwnd:X}");
                     VisibleRegionChanged?.Invoke(this, newRegion);
                 }
 
@@ -155,6 +180,8 @@ public sealed class WindowTracker : IWindowTracker, IDisposable
                 IsWindowPresent = false;
                 IsMinimized = false;
                 VisibleRegion = null;
+                IsLikelyFullyHidden = false;
+                _lastLikelyFullyHidden = false;
                 // Reset so that on re-appearance VisibleRegionChanged fires with the new region.
                 _lastVisibleRegion = null;
 
@@ -182,20 +209,20 @@ public sealed class WindowTracker : IWindowTracker, IDisposable
         }
     }
 
-    private (Rect Bounds, IntPtr Hwnd, bool IsMinimized, IReadOnlyList<Rect> VisibleRegion)? SampleWindowState()
+    private (Rect Bounds, IntPtr Hwnd, bool IsMinimized, IReadOnlyList<Rect> VisibleRegion, bool LikelyFullyHidden)? SampleWindowState()
     {
         var hwnd = _profile.FindWindowHandle();
         if (hwnd == IntPtr.Zero) return null;
 
         if (_win32.IsIconic(hwnd))
-            return (Rect.Empty, hwnd, IsMinimized: true, VisibleRegion: Array.Empty<Rect>());
+            return (Rect.Empty, hwnd, IsMinimized: true, VisibleRegion: Array.Empty<Rect>(), LikelyFullyHidden: true);
 
         if (!_win32.GetWindowRect(hwnd, out var rect)) return null;
 
         var isZoomed = _win32.IsZoomed(hwnd);
         var normalizedRect = NormalizeWindowRect(rect, hwnd, isZoomed, _win32);
 
-        var visiblePhysical = ComputeVisibleRegion(normalizedRect, hwnd, _overlayWindowHandle, _win32);
+        var (visiblePhysical, likelyFullyHidden) = ComputeVisibleRegion(normalizedRect, hwnd, _overlayWindowHandle, _win32);
 
         var dpi = _win32.GetDpiForWindow(hwnd);
         var dipBounds = ToDeviceIndependentRect(normalizedRect, dpi);
@@ -203,7 +230,7 @@ public sealed class WindowTracker : IWindowTracker, IDisposable
             ? Array.Empty<Rect>()
             : visiblePhysical.ConvertAll(r => ToDeviceIndependentRect(r, dpi));
 
-        return (dipBounds, hwnd, false, dipVisible);
+        return (dipBounds, hwnd, false, dipVisible, likelyFullyHidden);
     }
 
     internal static RECT NormalizeWindowRect(RECT rawRect, IntPtr hwnd, bool isZoomed, IWin32Api win32)
@@ -226,19 +253,36 @@ public sealed class WindowTracker : IWindowTracker, IDisposable
     // These are visible in the Z-order but are not user-facing covering apps.
     private const int WS_EX_TOOLWINDOW = 0x80;
 
+    // WS_EX_TRANSPARENT: click-through windows that don't visually block content beneath
+    // them.  The same flag the overlay itself sets.  Win32's WindowFromPoint skips these;
+    // the Z-order subtraction must do the same so it doesn't false-positive "WhatsApp
+    // is fully covered" when a click-through overlay (Zoom's annotation layer, share-host
+    // wrapper, etc.) sits above WhatsApp with bounds spanning the screen.
+    private const int WS_EX_TRANSPARENT = 0x20;
+
     /// <summary>
     /// Computes which sub-rectangles of <paramref name="physicalRect"/> remain visible
     /// after subtracting all visible, non-minimized top-level windows above
     /// <paramref name="whatsappHwnd"/> in Z-order (excluding the overlay window).
     /// Returns the full rect when nothing covers it, or an empty list when fully occluded.
+    ///
+    /// Also returns <c>likelyFullyHidden</c> — true when WhatsApp has zero pixels
+    /// actually visible to the user.  Distinguishes "false-positive full occlusion
+    /// from share-app overlay tiles stacking" (likelyFullyHidden = false) from
+    /// "true full occlusion behind a fullscreen foreground app" (likelyFullyHidden =
+    /// true).  Determined by sampling several points inside the tracked window's rect
+    /// with <c>WindowFromPoint</c>, which Windows uses to answer "what window is
+    /// visually on top here?" — it correctly skips <c>WS_EX_TRANSPARENT</c> click-through
+    /// overlays (e.g. Zoom's annotation layer during a share), so transparent
+    /// fullscreen overlays from sharing apps don't cause false positives.
     /// </summary>
-    internal static List<RECT> ComputeVisibleRegion(
+    internal static (List<RECT> visibleRects, bool likelyFullyHidden) ComputeVisibleRegion(
         RECT physicalRect, IntPtr whatsappHwnd, IntPtr overlayHwnd, IWin32Api win32)
     {
-        if (whatsappHwnd == IntPtr.Zero) return new List<RECT>();
+        if (whatsappHwnd == IntPtr.Zero) return (new List<RECT>(), false);
 
         var whatsappRoot = NormalizeRoot(whatsappHwnd, win32);
-        if (whatsappRoot == IntPtr.Zero) return new List<RECT>();
+        if (whatsappRoot == IntPtr.Zero) return (new List<RECT>(), false);
 
         var overlayRoot = overlayHwnd == IntPtr.Zero ? IntPtr.Zero : NormalizeRoot(overlayHwnd, win32);
 
@@ -269,9 +313,15 @@ public sealed class WindowTracker : IWindowTracker, IDisposable
                 continue;
             }
 
-            // Skip toolwindows: system UI (taskbar strips, tray popups, notification
-            // islands) that appear above all normal windows but are not covering apps.
-            if ((win32.GetWindowExStyle(current) & WS_EX_TOOLWINDOW) != 0)
+            // Skip toolwindows AND click-through (WS_EX_TRANSPARENT) windows.  Toolwindows
+            // are system UI (taskbar strips, tray popups).  WS_EX_TRANSPARENT windows are
+            // visually pass-through — they don't block what's beneath them, so they
+            // shouldn't subtract from WhatsApp's visible region either (this is what
+            // WindowFromPoint already does, and what the user sees).  Catches Zoom's
+            // annotation/share-host overlays during a real share without needing the
+            // "during share, override the visible region" hack the orchestrator used to do.
+            int exStyle = win32.GetWindowExStyle(current);
+            if ((exStyle & (WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT)) != 0)
             {
                 current = win32.GetPreviousWindow(current);
                 continue;
@@ -282,14 +332,64 @@ public sealed class WindowTracker : IWindowTracker, IDisposable
                 if (win32.GetWindowRect(current, out var coveringRect))
                 {
                     visibleRects = SubtractRect(visibleRects, coveringRect);
-                    if (visibleRects.Count == 0) return visibleRects; // fully occluded
+                    if (visibleRects.Count == 0) break; // fully occluded
                 }
             }
 
             current = win32.GetPreviousWindow(current);
         }
 
-        return visibleRects;
+        // Determine likelyFullyHidden via WindowFromPoint sampling.  The geometric
+        // FullyContains check this used to do produced false positives during real
+        // Zoom shares: Zoom drops several transparent (WS_EX_TRANSPARENT) fullscreen
+        // overlays — the annotation layer, share host wrapper, etc. — whose
+        // GetWindowRect spans the entire monitor.  Geometrically that "fully contains"
+        // WhatsApp, but visually those overlays are click-through and don't block
+        // WhatsApp's pixels.  WindowFromPoint authoritatively answers the question
+        // "what window's pixels are on top here?" — it skips WS_EX_TRANSPARENT
+        // windows automatically — so sampling 5 points (4 inset corners + center)
+        // gives a correct visual signal in all the cases we care about.
+        bool likelyFullyHidden = !AnySamplePointResolvesToWhatsApp(
+            physicalRect, whatsappRoot, win32);
+
+        return (visibleRects, likelyFullyHidden);
+    }
+
+    /// <summary>
+    /// True if any of 5 sample points within <paramref name="rect"/> resolves via
+    /// <c>WindowFromPoint</c> to a window whose root is <paramref name="whatsappRoot"/>.
+    /// Sample inset by 4 px from each edge to avoid landing on borders / shadows.
+    /// </summary>
+    private static bool AnySamplePointResolvesToWhatsApp(
+        RECT rect, IntPtr whatsappRoot, IWin32Api win32)
+    {
+        int width  = rect.Right  - rect.Left;
+        int height = rect.Bottom - rect.Top;
+        if (width <= 0 || height <= 0) return false;
+
+        int inset = Math.Min(4, Math.Min(width, height) / 4);
+        int cx = (rect.Left + rect.Right)  / 2;
+        int cy = (rect.Top  + rect.Bottom) / 2;
+
+        // 4 inset corners + center.
+        var samples = new[]
+        {
+            new POINT { X = rect.Left  + inset, Y = rect.Top    + inset },
+            new POINT { X = rect.Right - inset, Y = rect.Top    + inset },
+            new POINT { X = rect.Left  + inset, Y = rect.Bottom - inset },
+            new POINT { X = rect.Right - inset, Y = rect.Bottom - inset },
+            new POINT { X = cx,                  Y = cy                  },
+        };
+
+        for (int i = 0; i < samples.Length; i++)
+        {
+            var hit = win32.WindowFromPoint(samples[i]);
+            if (hit == IntPtr.Zero) continue;
+            var hitRoot = win32.GetRootWindow(hit);
+            if (hitRoot == IntPtr.Zero) hitRoot = hit;
+            if (hitRoot == whatsappRoot) return true;
+        }
+        return false;
     }
 
     // Subtracts `covering` from each rect in `visibleRects`, producing up to 4 sub-rects per

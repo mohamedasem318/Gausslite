@@ -305,6 +305,40 @@ public sealed class TrayOrchestratorClipTests
     }
 
     [Fact]
+    public void ManualBlur_PartialOcclusion_AppliesClipToVisibleRegion()
+    {
+        // Spotify-style partial cover during MANUAL blur (no share active).
+        // The visible region from the tracker becomes [some uncovered rect],
+        // and the overlay's clip MUST be set to that rect — not cleared — so
+        // the always-on-top overlay doesn't paint blurred WhatsApp pixels on
+        // top of the covering app.
+        SetupWindowFound();
+        SetupReadback();
+
+        using var sut = CreateSut();
+        EnableAndDetect(sut);
+        _overlayWindow.ClearReceivedCalls();
+
+        // Spotify covers the right half of WhatsApp.
+        var leftHalfVisible = new[] { new Rect(0, 0, 400, 600) };
+        _windowTracker.VisibleRegion.Returns(leftHalfVisible);
+        _windowTracker.VisibleRegionChanged += Raise.Event<EventHandler<IReadOnlyList<Rect>>>(
+            this, (IReadOnlyList<Rect>)leftHalfVisible);
+
+        // Clip MUST be the visible rect (in overlay-local coords; with bounds at
+        // origin (0,0) the screen and overlay-local rects are equal).  Crucially,
+        // we must NOT receive SetClip(null) which would mean "no clip = paint
+        // everywhere = leak on top of Spotify".
+        _overlayWindow.Received().SetClip(Arg.Is<IReadOnlyList<Rect>>(rects =>
+            rects != null
+            && rects.Count == 1
+            && rects[0].X == 0
+            && rects[0].Y == 0
+            && rects[0].Width == 400
+            && rects[0].Height == 600));
+    }
+
+    [Fact]
     public void BoundsChanged_RunsDetectionThenCallsSetClip()
     {
         SetupWindowFound();
